@@ -11,11 +11,14 @@
 __pycache__/
 
 bin/pypy-c
-include/*.h
+bin/pypy3.9-c
+include/**/*.h
 include/numpy/
 lib_pypy/ctypes_config_cache/_[^_]*_*.py
 libpypy-c.*
+libpypy3.9-c.*
 pypy-c
+pypy3.9-c
 pypy/_cache
 pypy/doc/*.html
 pypy/doc/config/*.html
@@ -26,7 +29,18 @@ pypy/module/test_lib_pypy/ctypes_tests/*.o
 pypy/translator/c/src/dtoa.o
 pypy/translator/goal/pypy-c
 pypy/translator/goal/target*-c
+rpython/rlib/rvmprof/src/shared/libbacktrace/Makefile
+rpython/rlib/rvmprof/src/shared/libbacktrace/config.guess
+rpython/rlib/rvmprof/src/shared/libbacktrace/config.h
+rpython/rlib/rvmprof/src/shared/libbacktrace/config.log
+rpython/rlib/rvmprof/src/shared/libbacktrace/config.status
 release/
-!pypy/tool/release/
 rpython/_cache/
 .cache/
+
+# build
+build/
+bin/
+site-packages/
+lib_pypy/
+pybuilddir.txt
