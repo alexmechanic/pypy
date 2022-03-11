@@ -8,7 +8,7 @@ class AppTestCProfile(object):
 
     def test_repr(self):
         import _lsprof
-        assert repr(_lsprof.Profiler) == "<type '_lsprof.Profiler'>"
+        assert repr(_lsprof.Profiler) == "<class '_lsprof.Profiler'>"
 
     def test_builtins(self):
         import _lsprof
@@ -19,7 +19,7 @@ class AppTestCProfile(object):
         prof.disable()
         stats = prof.getstats()
         expected = (
-            "<len>",
+            "<built-in function len>",
             "<method 'append' of 'list' objects>",
             "<method 'disable' of '_lsprof.Profiler' objects>",
         )
@@ -37,7 +37,7 @@ class AppTestCProfile(object):
         prof.disable()
         stats = prof.getstats()
         expected = (
-            "<len>",
+            "<built-in function len>",
             "<method 'append' of 'list' objects>",
         )
         by_id = set()

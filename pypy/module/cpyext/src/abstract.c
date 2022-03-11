@@ -32,7 +32,7 @@ PyObject_DelItemString(PyObject *o, char *key)
         null_error();
         return -1;
     }
-    okey = PyString_FromString(key);
+    okey = PyUnicode_FromString(key);
     if (okey == NULL)
         return -1;
     ret = PyObject_DelItem(o, okey);
@@ -43,12 +43,16 @@ int
 PyObject_CheckReadBuffer(PyObject *obj)
 {
     PyBufferProcs *pb = obj->ob_type->tp_as_buffer;
+    Py_buffer view;
 
     if (pb == NULL ||
-        pb->bf_getreadbuffer == NULL ||
-        pb->bf_getsegcount == NULL ||
-        (*pb->bf_getsegcount)(obj, NULL) != 1)
+        pb->bf_getbuffer == NULL)
         return 0;
+    if ((*pb->bf_getbuffer)(obj, &view, PyBUF_SIMPLE) == -1) {
+        PyErr_Clear();
+        return 0;
+    }
+    PyBuffer_Release(&view);
     return 1;
 }
 
@@ -57,8 +61,7 @@ int PyObject_AsReadBuffer(PyObject *obj,
                           Py_ssize_t *buffer_len)
 {
     PyBufferProcs *pb;
-    void *pp;
-    Py_ssize_t len;
+    Py_buffer view;
 
     if (obj == NULL || buffer == NULL || buffer_len == NULL) {
         null_error();
@@ -66,22 +69,19 @@ int PyObject_AsReadBuffer(PyObject *obj,
     }
     pb = obj->ob_type->tp_as_buffer;
     if (pb == NULL ||
-         pb->bf_getreadbuffer == NULL ||
-         pb->bf_getsegcount == NULL) {
+        pb->bf_getbuffer == NULL) {
         PyErr_SetString(PyExc_TypeError,
-                        "expected a readable buffer object");
+                        "expected an object with a buffer interface");
         return -1;
     }
-    if ((*pb->bf_getsegcount)(obj, NULL) != 1) {
-        PyErr_SetString(PyExc_TypeError,
-                        "expected a single-segment buffer object");
-        return -1;
-    }
-    len = (*pb->bf_getreadbuffer)(obj, 0, &pp);
-    if (len < 0)
-        return -1;
-    *buffer = pp;
-    *buffer_len = len;
+
+    if ((*pb->bf_getbuffer)(obj, &view, PyBUF_SIMPLE)) return -1;
+
+    *buffer = view.buf;
+    *buffer_len = view.len;
+    if (pb->bf_releasebuffer != NULL)
+        (*pb->bf_releasebuffer)(obj, &view);
+    Py_XDECREF(view.obj);
     return 0;
 }
 
@@ -90,8 +90,7 @@ int PyObject_AsWriteBuffer(PyObject *obj,
                            Py_ssize_t *buffer_len)
 {
     PyBufferProcs *pb;
-    void*pp;
-    Py_ssize_t len;
+    Py_buffer view;
 
     if (obj == NULL || buffer == NULL || buffer_len == NULL) {
         null_error();
@@ -99,22 +98,18 @@ int PyObject_AsWriteBuffer(PyObject *obj,
     }
     pb = obj->ob_type->tp_as_buffer;
     if (pb == NULL ||
-         pb->bf_getwritebuffer == NULL ||
-         pb->bf_getsegcount == NULL) {
+        pb->bf_getbuffer == NULL ||
+        ((*pb->bf_getbuffer)(obj, &view, PyBUF_WRITABLE) != 0)) {
         PyErr_SetString(PyExc_TypeError,
-                        "expected a writeable buffer object");
+                        "expected an object with a writable buffer interface");
         return -1;
     }
-    if ((*pb->bf_getsegcount)(obj, NULL) != 1) {
-        PyErr_SetString(PyExc_TypeError,
-                        "expected a single-segment buffer object");
-        return -1;
-    }
-    len = (*pb->bf_getwritebuffer)(obj,0,&pp);
-    if (len < 0)
-        return -1;
-    *buffer = pp;
-    *buffer_len = len;
+
+    *buffer = view.buf;
+    *buffer_len = view.len;
+    if (pb->bf_releasebuffer != NULL)
+        (*pb->bf_releasebuffer)(obj, &view);
+    Py_XDECREF(view.obj);
     return 0;
 }
 
@@ -295,10 +290,14 @@ void
 PyBuffer_Release(Py_buffer *view)
 {
     PyObject *obj = view->obj;
-    if (obj && Py_TYPE(obj)->tp_as_buffer && Py_TYPE(obj)->tp_as_buffer->bf_releasebuffer)
-        Py_TYPE(obj)->tp_as_buffer->bf_releasebuffer(obj, view);
-    Py_XDECREF(obj);
+    PyBufferProcs *pb;
+    if (obj == NULL)
+        return;
+    pb = Py_TYPE(obj)->tp_as_buffer;
+    if (pb && pb->bf_releasebuffer)
+        pb->bf_releasebuffer(obj, view);
     view->obj = NULL;
+    Py_DECREF(obj);
 }
 
 /* Operations on callable objects */
@@ -455,15 +454,7 @@ objargs_mktuple(va_list va)
     va_list countva;
     PyObject *result, *tmp;
 
-#ifdef VA_LIST_IS_ARRAY
-    memcpy(countva, va, sizeof(va_list));
-#else
-#ifdef __va_copy
-    __va_copy(countva, va);
-#else
-    countva = va;
-#endif
-#endif
+    Py_VA_COPY(countva, va);
 
     while (((PyObject *)va_arg(countva, PyObject *)) != NULL)
         ++n;

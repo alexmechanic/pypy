@@ -222,13 +222,6 @@ class W_GenericBox(W_NumpyObject):
             box = self
         return space.call_function(space.w_int, box.item(space))
 
-    def descr_long(self, space):
-        if isinstance(self, W_ComplexFloatingBox):
-            box = self.descr_get_real(space)
-        else:
-            box = self
-        return space.call_function(space.w_long, box.item(space))
-
     def descr_float(self, space):
         if isinstance(self, W_ComplexFloatingBox):
             box = self.descr_get_real(space)
@@ -237,10 +230,10 @@ class W_GenericBox(W_NumpyObject):
         return space.call_function(space.w_float, box.item(space))
 
     def descr_oct(self, space):
-        return space.oct(self.descr_int(space))
+        return space.call_method(space.builtin, 'oct', self.descr_int(space))
 
     def descr_hex(self, space):
-        return space.hex(self.descr_int(space))
+        return space.call_method(space.builtin, 'hex', self.descr_int(space))
 
     def descr_nonzero(self, space):
         return space.newbool(self.get_dtype(space).itemtype.bool(self))
@@ -403,12 +396,6 @@ class W_GenericBox(W_NumpyObject):
     def buffer_w(self, space, flags):
         return self.descr_ravel(space).buffer_w(space, flags)
 
-    def readbuf_w(self, space):
-        return self.descr_ravel(space).readbuf_w(space)
-
-    def charbuf_w(self, space):
-        return self.descr_ravel(space).charbuf_w(space)
-
     def descr_byteswap(self, space):
         return self.get_dtype(space).itemtype.byteswap(self)
 
@@ -556,8 +543,10 @@ class W_FlexibleBox(W_GenericBox):
 
 class W_VoidBox(W_FlexibleBox):
     def descr_getitem(self, space, w_item):
-        if space.isinstance_w(w_item, space.w_basestring):
+        if space.isinstance_w(w_item, space.w_text):
             item = space.text_w(w_item)
+        elif space.isinstance_w(w_item, space.w_bytes):
+            item = space.bytes_w(w_item)   # XXX should it be supported?
         elif space.isinstance_w(w_item, space.w_int):
             indx = space.int_w(w_item)
             try:
@@ -587,8 +576,10 @@ class W_VoidBox(W_FlexibleBox):
         return space.newseqiter(self)
 
     def descr_setitem(self, space, w_item, w_value):
-        if space.isinstance_w(w_item, space.w_basestring):
+        if space.isinstance_w(w_item, space.w_text):
             item = space.text_w(w_item)
+        elif space.isinstance_w(w_item, space.w_bytes):
+            item = space.bytes_w(w_item)   # XXX should it be supported?
         elif space.isinstance_w(w_item, space.w_int):
             indx = space.int_w(w_item)
             try:
@@ -665,7 +656,7 @@ class W_ObjectBox(W_GenericBox):
     def descr__getattr__(self, space, w_key):
         return space.getattr(self.w_obj, w_key)
 
-W_GenericBox.typedef = TypeDef("numpy.generic",
+W_GenericBox.typedef = TypeDef("numpy.generic", None, None, "read-write",
     __new__ = interp2app(W_GenericBox.descr__new__.im_func),
 
     __getitem__ = interp2app(W_GenericBox.descr_getitem),
@@ -674,9 +665,8 @@ W_GenericBox.typedef = TypeDef("numpy.generic",
     __repr__ = interp2app(W_GenericBox.descr_repr),
     __format__ = interp2app(W_GenericBox.descr_format),
     __int__ = interp2app(W_GenericBox.descr_int),
-    __long__ = interp2app(W_GenericBox.descr_long),
     __float__ = interp2app(W_GenericBox.descr_float),
-    __nonzero__ = interp2app(W_GenericBox.descr_nonzero),
+    __bool__ = interp2app(W_GenericBox.descr_nonzero),
     __oct__ = interp2app(W_GenericBox.descr_oct),
     __hex__ = interp2app(W_GenericBox.descr_hex),
 
@@ -906,12 +896,12 @@ W_VoidBox.typedef = TypeDef("numpy.void", W_FlexibleBox.typedef,
 W_CharacterBox.typedef = TypeDef("numpy.character", W_FlexibleBox.typedef,
 )
 
-W_StringBox.typedef = TypeDef("numpy.string_", (W_CharacterBox.typedef, W_BytesObject.typedef),
+W_StringBox.typedef = TypeDef("numpy.bytes_", (W_CharacterBox.typedef, W_BytesObject.typedef),
     __new__ = interp2app(W_StringBox.descr__new__string_box.im_func),
     __len__ = interp2app(W_StringBox.descr_len),
 )
 
-W_UnicodeBox.typedef = TypeDef("numpy.unicode_", (W_CharacterBox.typedef, W_UnicodeObject.typedef),
+W_UnicodeBox.typedef = TypeDef("numpy.str_", (W_CharacterBox.typedef, W_UnicodeObject.typedef),
     __new__ = interp2app(W_UnicodeBox.descr__new__unicode_box.im_func),
     __len__ = interp2app(W_UnicodeBox.descr_len),
 )

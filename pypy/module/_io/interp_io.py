@@ -1,16 +1,16 @@
 import os
+import sys
 
 from pypy.interpreter.error import OperationError, oefmt
 from pypy.interpreter.gateway import interp2app, unwrap_spec
 from pypy.interpreter.typedef import (
     TypeDef, interp_attrproperty, generic_new_descr)
-from pypy.module.exceptions.interp_exceptions import W_IOError
 from pypy.module._io.interp_fileio import W_FileIO
 from pypy.module._io.interp_textio import W_TextIOWrapper
-from rpython.rlib.rposix_stat import STAT_FIELD_TYPES
+from pypy.module.posix import interp_posix
+from rpython.rlib import jit
 
-HAS_BLKSIZE = 'st_blksize' in STAT_FIELD_TYPES
-
+_WIN32 = sys.platform == 'win32'
 
 class Cache:
     def __init__(self, space):
@@ -18,42 +18,27 @@ class Cache:
             "io.UnsupportedOperation",
             space.newtuple([space.w_ValueError, space.w_IOError]))
 
-class W_BlockingIOError(W_IOError):
-    def __init__(self, space):
-        W_IOError.__init__(self, space)
-        self.written = 0
-
-    @unwrap_spec(written=int)
-    def descr_init(self, space, w_errno, w_strerror, written=0):
-        W_IOError.descr_init(self, space, [w_errno, w_strerror])
-        self.written = written
-
-W_BlockingIOError.typedef = TypeDef(
-    'BlockingIOError', W_IOError.typedef,
-    __doc__ = ("Exception raised when I/O would block on a non-blocking "
-               "I/O stream"),
-    __new__  = generic_new_descr(W_BlockingIOError),
-    __init__ = interp2app(W_BlockingIOError.descr_init),
-    characters_written = interp_attrproperty('written', W_BlockingIOError,
-        wrapfn="newint"),
-    )
-
-DEFAULT_BUFFER_SIZE = 8 * 1024
-
 @unwrap_spec(mode='text', buffering=int,
              encoding="text_or_none", errors="text_or_none",
-             newline="text_or_none", closefd=bool)
+             newline="text_or_none", closefd=int)
 def open(space, w_file, mode="r", buffering=-1, encoding=None, errors=None,
-    newline=None, closefd=True):
+         newline=None, closefd=True, w_opener=None):
+    return _open(space, w_file, mode, buffering, encoding, errors, newline,
+            closefd, w_opener)
+
+@jit.look_inside_iff(lambda space, w_file, mode, buffering, encoding, errors,
+        newlines, closefd, w_opener: jit.isconstant(mode))
+def _open(space, w_file, mode, buffering, encoding, errors, newline, closefd,
+        w_opener):
     from pypy.module._io.interp_bufferedio import (W_BufferedRandom,
         W_BufferedWriter, W_BufferedReader)
 
-    if not (space.isinstance_w(w_file, space.w_basestring) or
-        space.isinstance_w(w_file, space.w_int) or
-        space.isinstance_w(w_file, space.w_long)):
-        raise oefmt(space.w_TypeError, "invalid file: %R", w_file)
+    if not (space.isinstance_w(w_file, space.w_unicode) or
+            space.isinstance_w(w_file, space.w_bytes) or
+            space.isinstance_w(w_file, space.w_int)):
+        w_file = interp_posix.fspath(space, w_file)
 
-    reading = writing = appending = updating = text = binary = universal = False
+    reading = writing = creating = appending = updating = text = binary = universal = False
 
     uniq_mode = {}
     for flag in mode:
@@ -65,6 +50,8 @@ def open(space, w_file, mode="r", buffering=-1, encoding=None, errors=None,
             reading = True
         elif flag == "w":
             writing = True
+        elif flag == "x":
+            creating = True
         elif flag == "a":
             appending = True
         elif flag == "+":
@@ -79,81 +66,122 @@ def open(space, w_file, mode="r", buffering=-1, encoding=None, errors=None,
         else:
             raise oefmt(space.w_ValueError, "invalid mode: %s", mode)
 
-    rawmode = ""
-    if reading:
-        rawmode += "r"
-    if writing:
-        rawmode += "w"
-    if appending:
-        rawmode += "a"
-    if updating:
-        rawmode += "+"
 
-    if universal and (writing or appending):
-        raise oefmt(space.w_ValueError, "can't use U and writing mode at once")
+    if universal:
+        if writing or appending or creating or updating:
+            raise oefmt(space.w_ValueError,
+                        "mode U cannot be combined with 'x', 'w', 'a', or '+'")
+        space.warn(space.newtext("'U' mode is deprecated ('r' has the same "
+                              "effect in Python 3.x)"),
+                   space.w_DeprecationWarning)
     if text and binary:
         raise oefmt(space.w_ValueError,
                     "can't have text and binary mode at once")
-    if reading + writing + appending > 1:
+    if creating + reading + writing + appending > 1:
         raise oefmt(space.w_ValueError,
-                    "must have exactly one of read/write/append mode")
+                    "must have exactly one of create/read/write/append mode")
     if binary and encoding is not None:
         raise oefmt(space.w_ValueError,
                     "binary mode doesn't take an encoding argument")
     if binary and newline is not None:
         raise oefmt(space.w_ValueError,
                     "binary mode doesn't take a newline argument")
-    w_raw = space.call_function(
-        space.gettypefor(W_FileIO), w_file, space.newtext(rawmode), space.newbool(closefd)
-    )
+    if binary and buffering == 1:
+        space.warn(
+            space.newtext(
+                "line buffering (buffering=1) isn't supported in "
+                "binary mode, the default buffer size will be used"
+            ), space.w_RuntimeWarning
+        )
 
-    isatty = space.is_true(space.call_method(w_raw, "isatty"))
-    line_buffering = buffering == 1 or (buffering < 0 and isatty)
-    if line_buffering:
-        buffering = -1
-
-    if buffering < 0:
-        buffering = DEFAULT_BUFFER_SIZE
-
-        if HAS_BLKSIZE:
-            fileno = space.c_int_w(space.call_method(w_raw, "fileno"))
-            try:
-                st = os.fstat(fileno)
-            except OSError:
-                # Errors should never pass silently, except this one time.
-                pass
-            else:
-                if st.st_blksize > 1:
-                    buffering = st.st_blksize
-
-    if buffering < 0:
-        raise oefmt(space.w_ValueError, "invalid buffering size")
-
-    if buffering == 0:
-        if not binary:
-            raise oefmt(space.w_ValueError, "can't have unbuffered text I/O")
-        return w_raw
-
-    if updating:
-        buffer_cls = W_BufferedRandom
-    elif writing or appending:
-        buffer_cls = W_BufferedWriter
-    elif reading:
-        buffer_cls = W_BufferedReader
+    rawmode = ""
+    if reading:
+        rawmode = "r"
+        if updating:
+            rawmode = "r+"
+    elif writing:
+        rawmode = "w"
+        if updating:
+            rawmode = "w+"
+    elif creating:
+        rawmode = "x"
+        if updating:
+            rawmode = "x+"
+    elif appending:
+        rawmode = "a"
+        if updating:
+            rawmode = "a+"
     else:
-        raise oefmt(space.w_ValueError, "unknown mode: '%s'", mode)
-    w_buffer = space.call_function(
-        space.gettypefor(buffer_cls), w_raw, space.newint(buffering)
-    )
-    if binary:
-        return w_buffer
+        # error, will be raised from interp_fileio
+        if updating:
+            rawmode = "+"
 
-    w_wrapper = space.call_function(space.gettypefor(W_TextIOWrapper),
-        w_buffer,
-        space.newtext_or_none(encoding),
-        space.newtext_or_none(errors),
-        space.newtext_or_none(newline),
-        space.newbool(line_buffering)
-    )
-    space.setattr(w_wrapper, space.newtext("mode"), space.newtext(mode))
-    return w_wrapper
+    w_result = None
+    try:
+        rawclass = W_FileIO
+        if _WIN32:
+            from pypy.module._io.interp_win32consoleio import W_WinConsoleIO, _pyio_get_console_type
+            typ = _pyio_get_console_type(space, w_file)
+            if typ != '\0':
+                rawclass = W_WinConsoleIO
+                encoding = "utf-8"
+            w_raw = space.call_function(
+                space.gettypefor(rawclass), w_file, space.newtext(rawmode),
+                space.newbool(bool(closefd)), w_opener)
+        else:
+            w_raw = W_FileIO(space)
+            w_raw.descr_init(space, w_file, rawmode, bool(closefd), w_opener)
+                
+        w_result = w_raw
+
+        isatty = space.is_true(space.call_method(w_raw, "isatty"))
+        line_buffering = buffering == 1 or (buffering < 0 and isatty)
+        if line_buffering:
+            buffering = -1
+
+        if buffering < 0:
+            buffering = space.c_int_w(space.getattr(
+                w_raw, space.newtext("_blksize")))
+
+        if buffering < 0:
+            raise oefmt(space.w_ValueError, "invalid buffering size")
+
+        if buffering == 0:
+            if not binary:
+                raise oefmt(space.w_ValueError,
+                            "can't have unbuffered text I/O")
+            return w_result
+
+        if updating:
+            w_buffer = W_BufferedRandom(space)
+            w_buffer.descr_init(space, w_raw, buffering)
+        elif writing or creating or appending:
+            w_buffer = W_BufferedWriter(space)
+            w_buffer.descr_init(space, w_raw, buffering)
+        elif reading:
+            w_buffer = W_BufferedReader(space)
+            w_buffer.descr_init(space, w_raw, buffering)
+        else:
+            raise oefmt(space.w_ValueError, "unknown mode: '%s'", mode)
+        w_result = w_buffer
+        if binary:
+            return w_result
+
+        w_wrapper = W_TextIOWrapper(space)
+        w_wrapper.descr_init(space, w_buffer, encoding,
+                             space.newtext_or_none(errors),
+                             space.newtext_or_none(newline),
+                             line_buffering)
+        w_result = w_wrapper
+        space.setattr(w_wrapper, space.newtext("mode"), space.newtext(mode))
+        return w_result
+    except OperationError as e:
+        if w_result:
+            try:
+                space.call_method(w_result, "close")
+            except OperationError as e2:
+                e.chain_exceptions(space, e2)
+        raise
+
+def open_code(space, w_file):
+    return open(space, w_file, "rb")

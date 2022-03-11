@@ -240,11 +240,11 @@ class Test__ffi(BaseTestPyPyC):
             _write = libc.load_function(BWrite, 'write')
             i = 0
             fd0, fd1 = os.pipe()
-            buffer = _cffi_backend.newp(BCharP, 'A')
+            buffer = _cffi_backend.newp(BCharP, b'A')
             while i < 300:
                 tmp = _write(fd1, buffer, 1)   # ID: cfficall
                 assert tmp == 1
-                assert os.read(fd0, 2) == 'A'
+                assert os.read(fd0, 2) == b'A'
                 i += 1
             os.close(fd0)
             os.close(fd1)
@@ -369,7 +369,7 @@ class Test__ffi(BaseTestPyPyC):
             };
             """)
 
-            for i in xrange(n):
+            for i in range(n):
                 ffi.new("struct s *", [i, i, i])
 
         log = self.run(main, [300])
@@ -392,6 +392,8 @@ class Test__ffi(BaseTestPyPyC):
         guard_value(p122, ConstPtr(ptr123), descr=...)
         p125 = getfield_gc_r(p16, descr=...)
         guard_nonnull_class(p125, ..., descr=...)
+        p999 = getfield_gc_r(p125, descr=...)
+        guard_isnull(p999, descr=...)
         p127 = getfield_gc_r(p125, descr=...)
         guard_value(p127, ConstPtr(ptr128), descr=...)
         p129 = getfield_gc_r(p127, descr=...)

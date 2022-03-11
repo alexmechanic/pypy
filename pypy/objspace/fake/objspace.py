@@ -1,4 +1,5 @@
 from rpython.annotator.model import SomeInstance, s_None
+from rpython.annotator.listdef import s_list_of_strings
 from rpython.rlib.objectmodel import (instantiate, we_are_translated, specialize,
     not_rpython)
 from rpython.rlib.nonconst import NonConstant
@@ -6,14 +7,15 @@ from rpython.rlib.rarithmetic import r_uint, r_singlefloat
 from rpython.rlib.debug import make_sure_not_resized
 from rpython.rtyper.extregistry import ExtRegistryEntry
 from rpython.rtyper.lltypesystem import lltype
-from pypy.tool.option import make_config
 from rpython.tool.sourcetools import compile2, func_with_new_name
 from rpython.translator.translator import TranslationContext
+from rpython.translator.c.genc import CStandaloneBuilder
 
 from pypy.tool.option import make_config
 from pypy.interpreter import argument, gateway
 from pypy.interpreter.baseobjspace import W_Root, ObjSpace, SpaceCache
 from pypy.interpreter.buffer import StringBuffer, SimpleView
+from pypy.interpreter.mixedmodule import MixedModule
 from pypy.interpreter.typedef import TypeDef, GetSetProperty
 from pypy.objspace.std.sliceobject import W_SliceObject
 
@@ -44,10 +46,11 @@ class W_MyObject(W_Root):
         is_root(w_subtype)
 
     def buffer_w(self, space, flags):
-        return SimpleView(StringBuffer("foobar"))
+        return SimpleView(StringBuffer("foobar"), w_obj=self)
 
-    def str_w(self, space):
+    def text_w(self, space):
         return NonConstant("foobar")
+    bytes_w = text_w
 
     def utf8_w(self, space):
         return NonConstant("foobar")
@@ -68,6 +71,16 @@ class W_MyObject(W_Root):
 class W_MyListObj(W_MyObject):
     def append(self, w_other):
         pass
+
+class W_UnicodeObject(W_MyObject):
+    _length = 21
+    _utf8 = 'foobar'
+
+    def _index_to_byte(self, at):
+        return NonConstant(42)
+
+    def _len(self):
+        return self._length
 
 class W_MyType(W_MyObject):
     name = "foobar"
@@ -124,9 +137,9 @@ class Entry(ExtRegistryEntry):
 # ____________________________________________________________
 
 
-BUILTIN_TYPES = ['int', 'str', 'float', 'long', 'tuple', 'list', 'dict',
-                 'unicode', 'complex', 'slice', 'bool', 'basestring', 'object',
-                 'set', 'frozenset', 'bytearray', 'buffer', 'memoryview']
+BUILTIN_TYPES = ['int', 'float', 'tuple', 'list', 'dict', 'bytes',
+                 'unicode', 'complex', 'slice', 'bool', 'text', 'object',
+                 'set', 'frozenset', 'bytearray', 'memoryview']
 
 INTERP_TYPES = ['function', 'builtin_function', 'module', 'getset_descriptor',
                 'instance', 'classobj']
@@ -138,6 +151,27 @@ class FakeObjSpace(ObjSpace):
         self._seen_extras = []
         ObjSpace.__init__(self, config=config)
         self.setup()
+
+        # Be sure to annotate W_SliceObject constructor.
+        # In Python2, this is triggered by W_InstanceObject.__getslice__.
+        def build_slice():
+            self.newslice(self.w_None, self.w_None, self.w_None)
+        def attach_list_strategy():
+            # this is needed for modules which interacts directly with
+            # std.listobject.W_ListObject, e.g. after an isinstance check. For
+            # example, _hpy_universal. We need to attach a couple of attributes
+            # so that the annotator annotates them with the correct types
+            from pypy.objspace.std.listobject import W_ListObject, ObjectListStrategy
+            space = self
+            w_obj = w_some_obj()
+            if isinstance(w_obj, W_ListObject):
+                w_obj.space = space
+                w_obj.strategy = ObjectListStrategy(space)
+                list_w = [w_some_obj(), w_some_obj()]
+                w_obj.lstorage = w_obj.strategy.erase(list_w)
+
+        self._seen_extras.append(build_slice)
+        self._seen_extras.append(attach_list_strategy)
 
     def _freeze_(self):
         return True
@@ -196,6 +230,10 @@ class FakeObjSpace(ObjSpace):
     def newlong(self, x):
         return w_some_obj()
 
+    @specialize.argtype(1)
+    def newlong_from_rarith_int(self, x):
+        return w_some_obj()
+
     def newfloat(self, x):
         return w_some_obj()
 
@@ -219,11 +257,16 @@ class FakeObjSpace(ObjSpace):
         return w_some_obj()
 
     def newutf8(self, x, l):
-        return w_some_obj()
+        return W_UnicodeObject()
 
-    newtext = newbytes
-    newtext_or_none = newbytes
-    newfilename = newbytes
+    def eq_w(self, obj1, obj2):
+        return NonConstant(True)
+
+    @specialize.argtype(1)
+    def newtext(self, x, lgt=-1):
+        return W_UnicodeObject()
+    newtext_or_none = newtext
+    newfilename = newtext
 
     @not_rpython
     def wrap(self, x):
@@ -301,8 +344,20 @@ class FakeObjSpace(ObjSpace):
         see_typedef(self, typedef)
         return w_some_type()
 
+    def getitem(self, w_obj, w_name):
+        is_root(w_obj)
+        is_root(w_name)
+        if isinstance(w_obj, FakeModules):
+            # For reset_lazy_initial_values,
+            # need to pretend we return a MixedModule object
+            return FakeMixedModule()
+        return w_some_type()
+
     def type(self, w_obj):
         return w_some_type()
+
+    def lookup_in_type_where(self, w_type, key):
+        return w_some_obj(), w_some_obj()
 
     def issubtype_w(self, w_sub, w_type):
         is_root(w_sub)
@@ -358,12 +413,23 @@ class FakeObjSpace(ObjSpace):
     def is_generator(self, w_obj):
         return NonConstant(False)
 
+    def is_iterable(self, w_obj):
+        return NonConstant(False)
+
     def lookup_in_type(self, w_type, name):
         return w_some_obj()
 
+    def warn(self, w_msg, w_warningcls, stacklevel=2):
+        pass
+
+    def _try_buffer_w(self, w_obj, flags):
+        return w_obj.buffer_w(self, flags)
+
     # ----------
 
-    def translates(self, func=None, argtypes=None, seeobj_w=[], **kwds):
+    def translates(self, func=None, argtypes=None, seeobj_w=[],
+                   extra_func=None, c_compile=False,
+                   **kwds):
         config = make_config(None, **kwds)
         if func is not None:
             if argtypes is None:
@@ -373,10 +439,14 @@ class FakeObjSpace(ObjSpace):
         t = TranslationContext(config=config)
         self.t = t     # for debugging
         ann = t.buildannotator()
-        def _do_startup():
+
+        def entry_point(argv):
             self.threadlocals.enter_thread(self)
             W_SliceObject(w_some_obj(), w_some_obj(), w_some_obj())
-        ann.build_types(_do_startup, [], complete_now=False)
+            if extra_func:
+                extra_func(self)
+            return 0
+        ann.build_types(entry_point, [s_list_of_strings], complete_now=False)
         if func is not None:
             ann.build_types(func, argtypes, complete_now=False)
         if seeobj_w:
@@ -398,10 +468,28 @@ class FakeObjSpace(ObjSpace):
         #t.viewcg()
         t.buildrtyper().specialize()
         t.checkgraphs()
+        from rpython.translator.backendopt.all import backend_optimizations
+        backend_optimizations(t, replace_we_are_jitted=True)
+        if c_compile:
+            cbuilder = CStandaloneBuilder(t, entry_point, t.config)
+            cbuilder.generate_source(defines=cbuilder.DEBUG_DEFINES)
+            cbuilder.compile()
+            return t, cbuilder
+
 
     def setup(space):
+        from pypy.module.exceptions import interp_exceptions
+        obj_space_exceptions = ObjSpace.ExceptionTable
+        # Add subclasses of the ExceptionTable errors
+        for name, exc in interp_exceptions.__dict__.items():
+            if (isinstance(exc, type) and
+                issubclass(exc, interp_exceptions.W_BaseException)):
+                name = name.replace("W_", "")
+                if name not in obj_space_exceptions:
+                    obj_space_exceptions.append(name)
+
         for name in (ObjSpace.ConstantTable +
-                     ObjSpace.ExceptionTable +
+                     obj_space_exceptions +
                      BUILTIN_TYPES):
             if name != "str":
                 setattr(space, 'w_' + name, w_some_obj())
@@ -410,7 +498,7 @@ class FakeObjSpace(ObjSpace):
         space.w_type = w_some_type()
         #
         for (name, _, arity, _) in ObjSpace.MethodTable:
-            if name == 'type':
+            if name in ('type', 'getitem'):
                 continue
             args = ['w_%d' % i for i in range(arity)]
             params = args[:]
@@ -443,7 +531,7 @@ def see_typedef(space, typedef):
             space.wrap(value)
 
 class FakeCompiler(object):
-    def compile(self, code, name, mode, flags):
+    def compile(self, code, name, mode, flags, optimize=-1):
         return FakePyCode()
 FakeObjSpace.default_compiler = FakeCompiler()
 
@@ -451,16 +539,23 @@ class FakePyCode(W_Root):
     def exec_code(self, space, w_globals, w_locals):
         return W_Root()
 
+class FakeMixedModule(MixedModule):
+    def __init__(self):
+        pass
+
+class FakeModules(W_Root):
+    pass
 
 class FakeModule(W_Root):
     def __init__(self):
         self.w_dict = w_some_obj()
     def get(self, name):
         name + "xx"   # check that it's a string
-        return w_some_obj()
+        return FakeModules()
+    def setmodule(self, w_mod):
+        is_root(w_mod)
 FakeObjSpace.sys = FakeModule()
 FakeObjSpace.sys.filesystemencoding = 'foobar'
 FakeObjSpace.sys.defaultencoding = 'ascii'
 FakeObjSpace.sys.dlopenflags = 123
-FakeObjSpace.sys.track_resources = False
 FakeObjSpace.builtin = FakeModule()

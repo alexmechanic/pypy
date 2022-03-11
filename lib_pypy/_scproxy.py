@@ -4,7 +4,7 @@ the SystemConfiguration framework.
 """
 import sys
 if sys.platform != 'darwin':
-    raise ImportError('Requires Mac OS X')
+    raise ModuleNotFoundError('Requires Mac OS X', name='_scproxy')
 
 from ctypes import c_int32, c_int64, c_void_p, c_char_p, c_int, cdll
 from ctypes import pointer, create_string_buffer
@@ -67,7 +67,7 @@ def cfstring_to_pystring(value):
     length = (ffi.CFStringGetLength(value) * 4) + 1
     buff = create_string_buffer(length)
     ffi.CFStringGetCString(value, buff, length * 4, kCFStringEncodingUTF8)
-    return unicode(buff.value, 'utf8')
+    return str(buff.value, 'utf8')
 
 def cfnum_to_int32(num):
     result_ptr = pointer(c_int32(0))
@@ -121,9 +121,9 @@ def _get_proxies():
                     if host:
                         if cfportnum:
                             port = cfnum_to_int32(cfportnum)
-                            v = u'http://%s:%d' % (host, port)
+                            v = 'http://%s:%d' % (host, port)
                         else:
-                            v = u'http://%s' % (host,)
+                            v = 'http://%s' % (host,)
                         result[proto.lower()] = v
         return result
     finally:

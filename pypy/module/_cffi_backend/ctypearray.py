@@ -171,6 +171,6 @@ class W_CDataIter(W_Root):
 W_CDataIter.typedef = TypeDef(
     '_cffi_backend.__CData_iterator',
     __iter__ = interp2app(W_CDataIter.iter_w),
-    next = interp2app(W_CDataIter.next_w),
+    __next__ = interp2app(W_CDataIter.next_w),
     )
 W_CDataIter.typedef.acceptable_as_base_class = False

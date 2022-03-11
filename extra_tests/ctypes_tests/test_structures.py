@@ -31,7 +31,6 @@ def test___init__():
     class Person(Structure):
         _fields_ = (("name", c_char*10),
                     ("age", c_int))
-
         def __init__(self, name, surname, age):
             self.name = name + b' ' + surname
             self.age = age
@@ -94,11 +93,6 @@ def test_b_base():
     obj = X()
     p = pointer(obj)
     assert p.contents._b_base_ is p
-
-def test_unicode_field_name():
-    # setattr autoconverts field names to bytes
-    class X(Structure):
-        _fields_ = [(u"i", c_int)]
 
 def test_swapped_bytes():
     import sys
@@ -214,3 +208,30 @@ def test_memoryview():
         assert mv.format == 'T{>h:a:>h:b:}'
     assert mv.shape == (2, 3)
     assert mv.itemsize == 4
+
+def test_memoryview_endian():
+    class LES(LittleEndianStructure):
+        _pack_ = 1
+        _fields_ = [
+            ('a', c_ubyte * 16),
+            ('i', c_uint64)
+        ]
+    c_les = LES()
+    mv = memoryview(c_les)
+    assert mv.format == 'B'
+
+def test_deepcopy_struct():
+    # issue 3022: missing __new__ on StructureInstanceAutoFree
+    import copy
+
+    class struct_a(Structure):
+        pass
+        
+    class struct_b(Structure):
+        pass
+        
+    struct_a._fields_ = [('first',struct_b)]
+
+    a = struct_a()
+    b = copy.deepcopy(a)
+    assert isinstance(b.first, struct_b)

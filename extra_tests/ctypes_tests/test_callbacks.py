@@ -18,10 +18,10 @@ def callback(*args):
 unwrapped_types = {
     c_float: (float,),
     c_double: (float,),
-    c_char: (str,),
-    c_char_p: (str,),
-    c_uint: (int, long),
-    c_ulong: (int, long),
+    c_char: (bytes,),
+    c_char_p: (bytes,),
+    c_uint: (int,),
+    c_ulong: (int,),
     }
 
 @pytest.mark.parametrize("typ, arg", [
@@ -59,7 +59,7 @@ def test_types(typ, arg, functype):
         assert result == arg
 
     result2 = cfunc(typ(arg))
-    assert type(result2) in unwrapped_types.get(typ, (int, long))
+    assert type(result2) in unwrapped_types.get(typ, (int,))
 
     PROTO = functype(typ, c_byte, typ)
     result = PROTO(callback)(-3, arg)
@@ -139,7 +139,12 @@ def test_qsort(dll):
     def comp(a, b):
         a = a.contents.value
         b = b.contents.value
-        return cmp(a,b)
+        if a < b:
+            return -1
+        elif a > b:
+            return 1
+        else:
+            return 0
     qs = dll.my_qsort
     qs.restype = None
     CMP = CFUNCTYPE(c_int, PI, PI)

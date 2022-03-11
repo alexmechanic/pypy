@@ -6,8 +6,8 @@ class TestBuffers(BaseTestPyPyC):
         def main(n):
             import re
             import array
-            p = re.compile('.+')
-            a = array.array('c', 'test' * 1000)
+            p = re.compile(b'.+')
+            a = array.array('B', b'test' * 1000)
             i = 0
             while i < n:
                 i += 1
@@ -18,6 +18,10 @@ class TestBuffers(BaseTestPyPyC):
         loop, = log.loops_by_filename(self.filepath)
         assert loop.match_by_id('match', """
             guard_not_invalidated(descr=...)
+            p71 = getfield_gc_r(p15, descr=...) # check that the pattern is not None and a W_BytesObject
+            guard_nonnull_class(p71, ConstClass(W_BytesObject), descr=...)
+            i74 = instance_ptr_eq(_, p71)
+            guard_false(i74, descr=...)
             i65 = getfield_gc_i(p18, descr=...)
             i67 = int_gt(0, i65)
             guard_false(i67, descr=...)
@@ -30,7 +34,7 @@ class TestBuffers(BaseTestPyPyC):
         def main(n):
             import _struct as struct
             import array
-            a = array.array('c', struct.pack('i', 42))
+            a = array.array('B', struct.pack('i', 42))
             i = 0
             while i < n:
                 i += 1

@@ -8,12 +8,14 @@ import stat
 import sys
 
 from rpython.rlib import rpath, rdynload
+from rpython.rlib.rstring import assert_str0
 from rpython.rlib.objectmodel import we_are_translated
 from rpython.rtyper.lltypesystem import lltype, rffi
 from rpython.translator.tool.cbuild import ExternalCompilationInfo
 
 from pypy.interpreter.gateway import unwrap_spec
 from pypy.module.sys.state import get as get_state
+from pypy.module.sys.interp_encoding import _getfilesystemencoding
 
 PLATFORM = sys.platform
 _MACOSX = sys.platform == 'darwin'
@@ -72,19 +74,61 @@ def resolvedirof(filename):
     return dirname
 
 
-def find_stdlib(state, executable):
+def find_pyvenv_cfg(dirname):
+    try:
+        fd = os.open(os.path.join(dirname, 'pyvenv.cfg'), os.O_RDONLY, 0)
+        try:
+            content = os.read(fd, 16384)
+        finally:
+            os.close(fd)
+    except OSError:
+        return ''
+    # painfully parse the file for a line 'home = PATH'
+    for line in content.splitlines():
+        line += '\x00'
+        i = 0
+        while line[i] == ' ':
+            i += 1
+        if (line[i] == 'h' and
+            line[i+1] == 'o' and
+            line[i+2] == 'm' and
+            line[i+3] == 'e'):
+            i += 4
+            while line[i] == ' ':
+                i += 1
+            if line[i] == '=':
+                line = line[i+1:]
+                n = line.find('\x00')
+                assert n >= 0
+                line = line[:n]
+                return assert_str0(line.strip())
+    return ''
+
+
+def find_stdlib(state, platlibdir, executable):
     """
     Find and compute the stdlib path, starting from the directory where
     ``executable`` is and going one level up until we find it.  Return a
     tuple (path, prefix), where ``prefix`` is the root directory which
     contains the stdlib.  If it cannot be found, return (None, None).
+
+    On PyPy3, it will also look for 'pyvenv.cfg' either in the same or
+    in the parent directory of 'executable', and search from the 'home'
+    entry instead of from the path to 'executable'.
     """
-    search = 'pypy-c' if executable == '' else executable
+    search = 'pypy3-c' if executable == '' else executable
+    search_pyvenv_cfg = 2
     while True:
         dirname = resolvedirof(search)
         if dirname == search:
             return None, None  # not found :-(
-        newpath = compute_stdlib_path_maybe(state, dirname)
+        if search_pyvenv_cfg > 0:
+            search_pyvenv_cfg -= 1
+            home = find_pyvenv_cfg(dirname)
+            if home:
+                dirname = home
+                search_pyvenv_cfg = 0
+        newpath = compute_stdlib_path_maybe(state, platlibdir, dirname)
         if newpath is not None:
             return newpath, dirname
         search = dirname    # walk to the parent directory
@@ -95,41 +139,65 @@ def _checkdir(path):
     if not stat.S_ISDIR(st[0]):
         raise OSError(errno.ENOTDIR, path)
 
+def _checkfile(path, fname):
+    pth = os.path.join(path, fname)
+    if not os.path.isfile(pth):
+        raise OSError(errno.EEXIST, pth)
 
-def compute_stdlib_path(state, prefix):
+def compute_stdlib_path_packaged(state, platlibdir, prefix):
+    """
+    Compute the paths for the stdlib rooted at ``prefix``. ``prefix``
+    must at least contain a directory called ``lib/pypyX.Y``.
+    If it cannot be found, it raises OSError. This version is called first, for
+    packaged PyPy.
+    """
+    from pypy.module.sys.version import CPYTHON_VERSION
+    lib_pyzip = os.path.join(prefix, 'python%d%d.zip' % CPYTHON_VERSION[:2])
+    if os.path.isfile(lib_pyzip):
+        python_std_lib = lib_pyzip
+    else:
+        if _WIN32:
+            lib_python = os.path.join(prefix, 'Lib')
+        else:
+            dirname = 'pypy%d.%d' % CPYTHON_VERSION[:2]
+            lib_python = os.path.join(prefix, platlibdir)
+            lib_python = os.path.join(lib_python, dirname)
+        python_std_lib = os.path.join(prefix, lib_python)
+        # In a source checkout, the directory will exist but site.py will not
+        # yet exist in it
+        _checkfile(python_std_lib, 'site.py')
+    return compute_lib_pypy_path(state, python_std_lib, prefix, use_lib_pypy=False)
+
+def compute_stdlib_path_sourcetree(state, platlibdir, prefix):
     """
     Compute the paths for the stdlib rooted at ``prefix``. ``prefix``
     must at least contain a directory called ``lib-python/X.Y`` and
     another one called ``lib_pypy``. If they cannot be found, it raises
-    OSError.
+    OSError. This version is called if compute_stdlib_path_packaged fails.
     """
     from pypy.module.sys.version import CPYTHON_VERSION
-    dirname = '%d.%d' % (CPYTHON_VERSION[0],
-                         CPYTHON_VERSION[1])
-    lib_python = os.path.join(prefix, 'lib-python')
-    python_std_lib = os.path.join(lib_python, dirname)
-    _checkdir(python_std_lib)
+    lib_pyzip = os.path.join(prefix, 'python%d%d.zip' % CPYTHON_VERSION[:2])
+    if os.path.isfile(lib_pyzip):
+        python_std_lib = lib_pyzip
+    else:
+        dirname = '%d' % CPYTHON_VERSION[0]
+        lib_python = os.path.join(prefix, 'lib-python')
+        python_std_lib = os.path.join(lib_python, dirname)
+        _checkdir(python_std_lib)
+    return compute_lib_pypy_path(state, python_std_lib, prefix)
 
-    lib_pypy = os.path.join(prefix, 'lib_pypy')
-    _checkdir(lib_pypy)
-
+def compute_lib_pypy_path(state, python_std_lib, prefix, use_lib_pypy=True):
     importlist = []
 
-    if state is not None:    # 'None' for testing only
-        lib_extensions = os.path.join(lib_pypy, '__extensions__')
-        state.w_lib_extensions = state.space.newtext(lib_extensions)
-        importlist.append(lib_extensions)
-
-    importlist.append(lib_pypy)
+    if use_lib_pypy:
+        lib_pypy = os.path.join(prefix, 'lib_pypy')
+        _checkdir(lib_pypy)
+        importlist.append(lib_pypy)
     importlist.append(python_std_lib)
 
-    lib_tk = os.path.join(python_std_lib, 'lib-tk')
-    importlist.append(lib_tk)
-
     # List here the extra platform-specific paths.
-    if not _WIN32:
-        importlist.append(os.path.join(python_std_lib, 'plat-' + PLATFORM))
     if _MACOSX:
+        # Is this still desirable?
         platmac = os.path.join(python_std_lib, 'plat-mac')
         importlist.append(platmac)
         importlist.append(os.path.join(platmac, 'lib-scriptpackages'))
@@ -137,44 +205,52 @@ def compute_stdlib_path(state, prefix):
     return importlist
 
 
-def compute_stdlib_path_maybe(state, prefix):
+def compute_stdlib_path_maybe(state, platlibdir, prefix):
     """Return the stdlib path rooted at ``prefix``, or None if it cannot
     be found.
     """
     try:
-        return compute_stdlib_path(state, prefix)
+        return compute_stdlib_path_packaged(state, platlibdir, prefix)
     except OSError:
-        return None
+        try:
+            return compute_stdlib_path_sourcetree(state, platlibdir, prefix)
+        except OSError:
+            return None
 
 
 @unwrap_spec(executable='fsencode')
 def pypy_find_executable(space, executable):
-    return space.newtext(find_executable(executable))
+    return space.newfilename(find_executable(executable))
 
 
 @unwrap_spec(filename='fsencode')
 def pypy_resolvedirof(space, filename):
-    return space.newtext(resolvedirof(filename))
+    return space.newfilename(resolvedirof(filename))
 
 
 @unwrap_spec(executable='fsencode')
 def pypy_find_stdlib(space, executable):
     path, prefix = None, None
     if executable != '*':
-        path, prefix = find_stdlib(get_state(space), executable)
+        path, prefix = find_stdlib(get_state(space), space.config.objspace.platlibdir, executable)
     if path is None:
         if space.config.translation.shared:
             dynamic_location = pypy_init_home()
             if dynamic_location:
                 dyn_path = rffi.charp2str(dynamic_location)
                 pypy_init_free(dynamic_location)
-                path, prefix = find_stdlib(get_state(space), dyn_path)
+                path, prefix = find_stdlib(get_state(space), space.config.objspace.platlibdir, dyn_path)
         if path is None:
             return space.w_None
-    w_prefix = space.newtext(prefix)
+    w_prefix = space.newfilename(prefix)
     space.setitem(space.sys.w_dict, space.newtext('prefix'), w_prefix)
     space.setitem(space.sys.w_dict, space.newtext('exec_prefix'), w_prefix)
-    return space.newlist([space.newtext(p) for p in path])
+    space.setitem(space.sys.w_dict, space.newtext('base_prefix'), w_prefix)
+    space.setitem(space.sys.w_dict, space.newtext('base_exec_prefix'), w_prefix)
+    return space.newlist([space.newfilename(p) for p in path])
+
+def pypy_initfsencoding(space):
+    space.sys.filesystemencoding = _getfilesystemencoding(space)
 
 
 # ____________________________________________________________

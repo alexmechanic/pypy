@@ -1,34 +1,117 @@
 import pytest
 from pytest import raises, skip
 
+class C:
+    def foo(self):
+        pass
+
+MethodType = type(C().foo)  # avoid costly import from types
+
 def test_attributes():
     globals()['__name__'] = 'mymodulename'
     def f(): pass
-    assert hasattr(f, 'func_code')
-    assert f.func_defaults == None
-    f.func_defaults = None
-    assert f.func_defaults == None
-    assert f.func_dict == {}
-    assert type(f.func_globals) == dict
-    assert f.func_globals is f.__globals__
-    assert f.func_closure is None
-    assert f.func_doc == None
-    assert f.func_name == 'f'
+    assert hasattr(f, '__code__')
+    assert f.__defaults__ == None
+    f.__defaults__ = None
+    assert f.__defaults__ == None
+    assert f.__dict__ == {}
+    assert type(f.__globals__) == dict
+    assert f.__closure__ is None
+    assert f.__doc__ == None
+    assert f.__name__ == 'f'
     assert f.__module__ == 'mymodulename'
+
+def test_qualname():
+    def f():
+        def g():
+            pass
+        return g
+    assert f.__qualname__ == 'test_qualname.<locals>.f'
+    assert f().__qualname__ == 'test_qualname.<locals>.f.<locals>.g'
+    f.__qualname__ = 'qualname'
+    assert f.__qualname__ == 'qualname'
+    raises(TypeError, "f.__qualname__ = b'name'")
+
+def test_qualname_method():
+    class A:
+        def f(self):
+            pass
+    assert A.f.__qualname__ == 'test_qualname_method.<locals>.A.f'
+
+def test_qualname_global():
+    def f():
+        global inner_global
+        def inner_global():
+            def inner_function2():
+                pass
+            return inner_function2
+        return inner_global
+    assert f().__qualname__ == 'inner_global'
+    assert f()().__qualname__ == 'inner_global.<locals>.inner_function2'
+
+def test_classmethod_reduce():
+    class X(object):
+        @classmethod
+        def y(cls):
+            pass
+
+    f, args = X.y.__reduce__()
+    assert f(*args) == X.y
+    # This is perhaps overly specific.  It's an attempt to be certain that
+    # pickle will actually work with this implementation.
+    assert f == getattr
+    assert args == (X, "y")
+
+def test_annotations():
+    def f(): pass
+    ann = f.__annotations__
+    assert ann == {}
+    assert f.__annotations__ is ann
+    raises(TypeError, setattr, f, "__annotations__", 42)
+    del f.__annotations__
+    assert f.__annotations__ is not ann
+    f.__annotations__ = ann
+    assert f.__annotations__ is ann
+
+def test_annotations_mangle():
+    class X:
+        def foo(self, __a:5, b:6):
+            pass
+    assert X.foo.__annotations__ == {'_X__a': 5, 'b': 6}
+
+def test_kwdefaults():
+    def f(*, kw=3): return kw
+    assert f.__kwdefaults__ == {"kw" : 3}
+    f.__kwdefaults__["kw"] = 4
+    assert f() == 4
+    f.__kwdefaults__ = {"kw" : 5}
+    assert f() == 5
+    del f.__kwdefaults__
+    assert f.__kwdefaults__ is None
+    raises(TypeError, f)
+    assert f(kw=42) == 42
+    def f(*, 日本=3): return kw
+    assert f.__kwdefaults__ == {"日本" : 3}
+
+def test_kw_nonascii():
+    def f(日本: str=1):
+        return 日本
+    assert f.__annotations__ == {'日本': str}
+    assert f() == 1
+    assert f(日本='bar') == 'bar'
 
 def test_code_is_ok():
     def f(): pass
-    assert not hasattr(f.func_code, '__dict__')
+    assert not hasattr(f.__code__, '__dict__')
 
 def test_underunder_attributes():
     def f(): pass
     assert f.__name__ == 'f'
     assert f.__doc__ == None
-    assert f.__name__ == f.func_name
-    assert f.__doc__ == f.func_doc
-    assert f.__dict__ is f.func_dict
-    assert f.__code__ is f.func_code
-    assert f.__defaults__ is f.func_defaults
+    assert f.__dict__ == {}
+    assert f.__code__.co_name == 'f'
+    assert f.__defaults__ is None
+    assert f.__globals__ is globals()
     assert hasattr(f, '__class__')
 
 def test_classmethod():
@@ -37,21 +120,13 @@ def test_classmethod():
     assert classmethod(f).__func__ is f
     assert staticmethod(f).__func__ is f
 
-def test_write_doc():
+def test_write___doc__():
     def f(): "hello"
     assert f.__doc__ == 'hello'
     f.__doc__ = 'good bye'
     assert f.__doc__ == 'good bye'
     del f.__doc__
     assert f.__doc__ == None
-
-def test_write_func_doc():
-    def f(): "hello"
-    assert f.func_doc == 'hello'
-    f.func_doc = 'good bye'
-    assert f.func_doc == 'good bye'
-    del f.func_doc
-    assert f.func_doc == None
 
 def test_write_module():
     def f(): "hello"
@@ -63,7 +138,7 @@ def test_write_module():
 def test_new():
     def f(): return 42
     FuncType = type(f)
-    f2 = FuncType(f.func_code, f.func_globals, 'f2', None, None)
+    f2 = FuncType(f.__code__, f.__globals__, 'f2', None, None)
     assert f2() == 42
 
     def g(x):
@@ -72,7 +147,7 @@ def test_new():
         return f
     f = g(42)
     with raises(TypeError):
-        FuncType(f.func_code, f.func_globals, 'f2', None, None)
+        FuncType(f.__code__, f.__globals__, 'f2', None, None)
 
 def test_write_code():
     def f():
@@ -82,46 +157,57 @@ def test_write_code():
     assert f() == 42
     assert g() == 41
     with raises(TypeError):
-        f.func_code = 1
-    f.func_code = g.func_code
+        f.__code__ = 1
+    f.__code__ = g.__code__
     assert f() == 41
-    def h():
-        return f() # a closure
+    def get_h(f=f):
+        def h():
+            return f() # a closure
+        return h
+    h = get_h()
     with raises(ValueError):
-        f.func_code = h.func_code
+        f.__code__ = h.__code__
 
 def test_write_code_builtin_forbidden():
     def f(*args):
         return 42
     with raises(TypeError):
-        dir.func_code = f.func_code
+        dir.__code__ = f.__code__
     with raises(TypeError):
-        list.append.im_func.func_code = f.func_code
+        list.append.__code__ = f.__code__
 
 def test_write_attributes_builtin_forbidden():
-    for func in [dir, dict.get.im_func]:
+    for func in [dir, dict.get]:
         with raises(TypeError):
-            func.func_defaults = (1, )
+            func.__defaults__ = (1, )
         with raises(TypeError):
-            del func.func_defaults
+            del func.__defaults__
         with raises(TypeError):
-            func.func_doc = ""
+            func.__doc__ = ""
         with raises(TypeError):
-            del func.func_doc
+            del func.__doc__
         with raises(TypeError):
-            func.func_name = ""
+            func.__name__ = ""
         with raises(TypeError):
             func.__module__ = ""
         with raises(TypeError):
             del func.__module__
 
-def test_set_name():
-    def f(): pass
-    f.__name__ = 'g'
-    assert f.func_name == 'g'
-    with raises(TypeError):
-        f.__name__ = u'g'
+def test_write_attributes_builtin_forbidden_py3():
+    for func in [dir, dict.get]:
+        with raises(TypeError):
+            func.__qualname__ = "abc"
+        with raises(TypeError):
+            func.__annotations__ = {}
+            del func.__annotations__
 
+
+def test_func_nonascii():
+    def 日本():
+        pass
+    assert repr(日本).startswith(
+        '<function test_func_nonascii.<locals>.日本 at ')
+    assert 日本.__name__ == '日本'
 
 def test_simple_call():
     def func(arg1, arg2):
@@ -211,8 +297,8 @@ def test_kwargs_nondict_mapping():
     assert res[1] == {'a': 'a', 'b': 'b'}
     with raises(TypeError) as excinfo:
         func(42, **[])
-    assert excinfo.value.message == (
-        'argument after ** must be a mapping, not list')
+    assert ('argument after ** must be a mapping, not list' in
+        str(excinfo.value))
 
 def test_default_arg():
     def func(arg1,arg2=42):
@@ -307,27 +393,31 @@ def test_call_error_message():
     try:
         len()
     except TypeError as e:
-        assert "len() takes exactly 1 argument (0 given)" in e.message
+        msg = str(e)
+        msg = msg.replace('one', '1') # CPython puts 'one', PyPy '1'
+        assert "len() missing 1 required positional argument: 'obj'" in msg
     else:
         assert 0, "did not raise"
 
     try:
         len(1, 2)
     except TypeError as e:
-        assert "len() takes exactly 1 argument (2 given)" in e.message
+        msg = str(e)
+        msg = msg.replace('one', '1') # CPython puts 'one', PyPy '1'
+        assert "len() takes 1 positional argument but 2 were given" in msg
     else:
         assert 0, "did not raise"
 
 def test_unicode_docstring():
     def f():
-        u"hi"
-    assert f.__doc__ == u"hi"
-    assert type(f.__doc__) is unicode
+        "hi"
+    assert f.__doc__ == "hi"
+    assert type(f.__doc__) is str
 
 def test_issue1293():
     def f1(): "doc f1"
     def f2(): "doc f2"
-    f1.func_code = f2.func_code
+    f1.__code__ = f2.__code__
     assert f1.__doc__ == "doc f1"
 
 def test_subclassing():
@@ -344,14 +434,7 @@ def test_lambda_docstring():
     # But let's not test that.  Just test that (lambda:42) does not
     # have 42 as docstring.
     f = lambda: 42
-    assert f.func_doc is None
-
-def test_setstate_called_with_wrong_args():
-    f = lambda: 42
-    # not sure what it should raise, since CPython doesn't have setstate
-    # on function types
-    with raises(ValueError):
-        type(f).__setstate__(f, (1, 2, 3))
+    assert f.__doc__ is None
 
 def test_simple_call():
     class A(object):
@@ -438,6 +521,16 @@ def test_method_eq():
     assert (c.m != c2.m) is True
     assert (c.m != c.m) is False
 
+def test_method_eq_bug():
+    # method equality is based on the identity of the underlying instances, not
+    # equality
+    class A:
+        def __eq__(self, other):
+            return True
+        def f(self): pass
+
+    assert A().f != A().f
+
 def test_method_hash():
     class C(object):
         def m(): pass
@@ -451,17 +544,20 @@ def test_method_repr():
     class A(object):
         def f(self):
             pass
-    assert repr(A.f) == "<unbound method A.f>"
-    assert repr(A().f).startswith("<bound method A.f of <")
-    assert repr(A().f).endswith(">>")
-    class B:
-        def f(self):
-            pass
-    assert repr(B.f) == "<unbound method B.f>"
-    assert repr(B().f).startswith("<bound method B.f of <")
+    assert repr(A().f).startswith("<bound method %s.f of <" %
+                                    A.__qualname__)
     assert repr(A().f).endswith(">>")
 
-    assert repr(type(A.f)) == repr(type(A().f)) == "<type 'instancemethod'>"
+def test_method_repr_2():
+    class ClsA(object):
+        def f(self):
+            pass
+    class ClsB(ClsA):
+        pass
+    r = repr(ClsB().f)
+    assert "ClsA.f of <" in r
+    assert repr(type(ClsA.f)) == "<class 'function'>"
+    assert repr(type(ClsA().f)) == "<class 'method'>"
 
 
 def test_method_call():
@@ -474,94 +570,39 @@ def test_method_w_callable():
     class A(object):
         def __call__(self, x):
             return x
-    import new
-    im = new.instancemethod(A(), 3)
+    im = MethodType(A(), 3)
     assert im() == 3
 
 def test_method_w_callable_call_function():
     class A(object):
         def __call__(self, x, y):
             return x+y
-    import new
-    im = new.instancemethod(A(), 3)
-    assert map(im, [4]) == [7]
+    im = MethodType(A(), 3)
+    assert list(map(im, [4])) == [7]
 
-def test_unbound_typecheck():
-    class A(object):
-        def foo(self, *args):
-            return args
-    class B(A):
-        pass
-    class C(A):
-        pass
 
-    assert A.foo(A(), 42) == (42,)
-    assert A.foo(B(), 42) == (42,)
-    with raises(TypeError):
-        A.foo(5)
-    with raises(TypeError):
-        B.foo(C())
-    with raises(TypeError):
-        class Fun:
-            __metaclass__ = A.foo
-    class Fun:
-        __metaclass__ = A().foo
-    assert Fun[:2] == ('Fun', ())
+class CallableBadGetattr:
+    def __getattr__(self, name):
+        # Ensure that __getattr__ doesn't get called
+        raise RuntimeError
 
-def test_unbound_abstract_typecheck():
-    import new
-    def f(*args):
-        return args
-    m = new.instancemethod(f, None, "foobar")
-    with raises(TypeError):
-        m()
-    with raises(TypeError):
-        m(None)
-    with raises(TypeError):
-        m("egg")
+    def __call__(self, a, b, c):
+        return a, b, c
 
-    m = new.instancemethod(f, None, (str, int))     # really obscure...
-    assert m(4) == (4,)
-    assert m("uh") == ("uh",)
-    with raises(TypeError):
-        m([])
-
-    class MyBaseInst(object):
-        pass
-    class MyInst(MyBaseInst):
-        def __init__(self, myclass):
-            self.myclass = myclass
-        def __class__(self):
-            if self.myclass is None:
-                raise AttributeError
-            return self.myclass
-        __class__ = property(__class__)
-    class MyClass(object):
-        pass
-    BBase = MyClass()
-    BSub1 = MyClass()
-    BSub2 = MyClass()
-    BBase.__bases__ = ()
-    BSub1.__bases__ = (BBase,)
-    BSub2.__bases__ = (BBase,)
-    x = MyInst(BSub1)
-    m = new.instancemethod(f, None, BSub1)
-    assert m(x) == (x,)
-    with raises(TypeError):
-        m(MyInst(BBase))
-    with raises(TypeError):
-        m(MyInst(BSub2))
-    with raises(TypeError):
-        m(MyInst(None))
-    with raises(TypeError):
-        m(MyInst(42))
+def test_custom_callable_errors():
+    fn = CallableBadGetattr()
+    with raises(TypeError) as excinfo:
+        fn(*1)
+    assert excinfo.value.args[0].startswith('CallableBadGetattr object')
+    with raises(TypeError) as excinfo:
+        fn()
+    assert excinfo.value.args[0].startswith('__call__()')
+    assert fn(1, 2, 3) == (1, 2, 3)
 
 def test_invalid_creation():
-    import new
-    def f():
-        pass
+    def f(): pass
     with raises(TypeError):
-        new.instancemethod(f, None)
+        MethodType(f, None)
 
 def test_empty_arg_kwarg_call():
     def f():
@@ -585,7 +626,6 @@ def test_method_equal():
     assert X() == A().m
 
 def test_method_equals_with_identity():
-    from types import MethodType
     class CallableBadEq(object):
         def __call__(self):
             pass
@@ -629,5 +669,84 @@ def test_method_identity():
     x = A.m
     assert x is not A.n
     assert id(x) != id(A.n)
-    assert x is not B.m
-    assert id(x) != id(B.m)
+    assert x is B.m
+    assert id(x) == id(B.m)
+
+def test_posonly():
+    def posonlyfunc(a, b, c, /, d):
+        return (a, b, c, d)
+
+    assert posonlyfunc(1, 2, 3, 4) == (1, 2, 3, 4)
+    with raises(TypeError):
+        posonlyfunc(a=1, b=2, c=3, d=4)
+
+def test_posonly_default():
+    def posonlyfunc(a, b=(), /, **kwds):
+        return a, b, kwds
+    assert posonlyfunc(1) == (1, (), {})
+    assert posonlyfunc(1, 2) == (1, 2, {})
+    assert posonlyfunc(1, 2, a=4, b=5) == (1, 2, {'a': 4, 'b': 5})
+
+def test_posonly_annotations():
+    def posonlyfunc(x: int, /):
+        pass
+    print(posonlyfunc.__annotations__)
+    assert posonlyfunc.__annotations__ == {"x": int}
+
+def global_inner_has_pos_only():
+    def f(x: int, /): ...
+    return f
+
+def test_posonly_annotations_crash():
+    assert global_inner_has_pos_only().__annotations__ == {"x": int}
+
+def test_classmethod_of_random_callable():
+    class Callable:
+        def __call__(self, cls):
+            print(cls)
+            assert cls is Class
+            return "foo"
+    class Class:
+        f = classmethod(Callable())
+    assert Class().f() == "foo"
+
+
+def test_classmethod_of_other_descriptor():
+    class BoundWrapper:
+        def __init__(self, wrapped):
+            self.__wrapped__ = wrapped
+
+        def __call__(self, *args, **kwargs):
+            return self.__wrapped__(*args, **kwargs)
+
+    class Wrapper:
+        def __init__(self, wrapped):
+            self.__wrapped__ = wrapped
+
+        def __get__(self, instance, owner):
+            bound_function = self.__wrapped__.__get__(instance, owner)
+            return BoundWrapper(bound_function)
+
+    def decorator(wrapped):
+        return Wrapper(wrapped)
+
+    class Class:
+        @decorator
+        @classmethod
+        def inner(cls):
+            # This should already work.
+            assert cls is Class
+            return 'spam'
+
+        @classmethod
+        @decorator
+        def outer(cls):
+            # Raised TypeError with a message saying that the 'Wrapper'
+            # object is not callable.
+            assert cls is Class
+            return 'eggs'
+
+    assert Class.inner() == 'spam'
+    assert Class.outer() == 'eggs'
+    assert Class().inner() == 'spam'
+    assert Class().outer() == 'eggs'

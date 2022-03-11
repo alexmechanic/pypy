@@ -1,13 +1,32 @@
+# coding: utf-8
 from rpython.rlib import rutf8
+from pypy.interpreter.baseobjspace import W_Root
 from pypy.interpreter.error import OperationError, oefmt
 from pypy.interpreter import unicodehelper
+from pypy.interpreter.pyparser.error import SyntaxError
 from rpython.rlib.rstring import StringBuilder
 
 
-def parsestr(space, encoding, s, unicode_literal=False):
-    """Parses a string or unicode literal, and return a wrapped value.
+class W_FString(W_Root):
+    def __init__(self, unparsed, raw_mode, token, content_offset=0):
+        assert isinstance(unparsed, str)    # utf-8 encoded string
+        self.unparsed = unparsed     # but the quotes are removed
+        self.raw_mode = raw_mode
+        self.current_index = 0       # for astcompiler.fstring
+        self.token = token
+        # offset behind the start of the string, after f" (or however it
+        # starts)
+        self.content_offset = content_offset
 
-    If encoding=iso8859-1, the source string is also in this encoding.
+
+
+# this function belongs to astbuilder.fstring somehow...
+
+def parsestr(space, encoding, s, token=None, astbuilder=None):
+    """Parses a string or unicode literal, and return usually
+    a wrapped value.  If we get an f-string, then instead return
+    an unparsed but unquoted W_FString instance.
+
     If encoding=None, the source string is ascii only.
     In other cases, the source string is in utf-8 encoding.
 
@@ -22,6 +41,9 @@ def parsestr(space, encoding, s, unicode_literal=False):
     ps = 0
     quote = s[ps]
     rawmode = False
+    unicode_literal = True
+    saw_u = False
+    saw_f = False
 
     # string decoration handling
     if quote == 'b' or quote == 'B':
@@ -31,11 +53,30 @@ def parsestr(space, encoding, s, unicode_literal=False):
     elif quote == 'u' or quote == 'U':
         ps += 1
         quote = s[ps]
-        unicode_literal = True
-    if quote == 'r' or quote == 'R':
+        saw_u = True
+    elif quote == 'r' or quote == 'R':
         ps += 1
         quote = s[ps]
         rawmode = True
+    elif quote == 'f' or quote == 'F':
+        ps += 1
+        quote = s[ps]
+        saw_f = True
+
+    if not saw_u:
+        if quote == 'r' or quote == 'R':
+            ps += 1
+            quote = s[ps]
+            rawmode = True
+        elif quote == 'b' or quote == 'B':
+            ps += 1
+            quote = s[ps]
+            unicode_literal = False
+        elif quote == 'f' or quote == 'F':
+            ps += 1
+            quote = s[ps]
+            saw_f = True
+
     if quote != "'" and quote != '"':
         raise_app_valueerror(space,
                              'Internal error: parser passed unquoted literal')
@@ -52,39 +93,45 @@ def parsestr(space, encoding, s, unicode_literal=False):
                                         'unmatched triple quotes in literal')
         q -= 2
 
-    if unicode_literal:
-        if encoding is None or encoding == "iso-8859-1":
-            # 'unicode_escape' expects latin-1 bytes, string is ready.
-            assert 0 <= ps <= q
-            substr = s[ps:q]
-        else:
-            unicodehelper.check_utf8_or_raise(space, s, ps, q)
-            substr = decode_unicode_utf8(space, s, ps, q)
-        if rawmode:
-            r = unicodehelper.decode_raw_unicode_escape(space, substr)
-        else:
-            r = unicodehelper.decode_unicode_escape(space, substr)
-        v, length = r
-        return space.newutf8(v, length)
-
-    need_encoding = (encoding is not None and
-                     encoding != "utf-8" and encoding != "utf8" and
-                     encoding != "iso-8859-1")
     assert 0 <= ps <= q
-    substr = s[ps : q]
-    if rawmode or '\\' not in s[ps:]:
-        if need_encoding:
-            lgt = unicodehelper.check_utf8_or_raise(space, substr)
-            w_u = space.newutf8(substr, lgt)
-            w_v = unicodehelper.encode(space, w_u, encoding)
-            return w_v
+    if unicode_literal:
+        if saw_f:
+            return W_FString(s[ps:q], rawmode, token, ps)
+        elif rawmode:
+            length = unicodehelper.check_utf8_or_raise(space, s, ps, q)
+            return space.newutf8(s[ps:q], length)
         else:
-            return space.newbytes(substr)
+            if encoding is None:
+                substr = s[ps:q]
+            else:
+                length = unicodehelper.check_utf8_or_raise(space, s, ps, q)
+                if "\\" not in s: # fast path, no escapes
+                    return space.newutf8(s[ps:q], length)
+                substr = decode_unicode_utf8(space, s, ps, q)
+            r = decode_unicode_escape(space, substr, astbuilder, token)
+            v, length, pos = r
+            return space.newutf8(v, length)
 
-    enc = None
-    if need_encoding:
-        enc = encoding
-    v = PyString_DecodeEscape(space, substr, 'strict', enc)
+    substr = s[ps : q]
+    # Disallow non-ascii characters (but not escapes)
+    for i, c in enumerate(substr):
+        if ord(c) > 0x80:
+            raise SyntaxError("bytes can only contain ASCII literal characters.",
+                token.lineno,
+                token.column + ps + i + 1)
+            raise oefmt(space.w_SyntaxError,
+                        )
+
+    if rawmode or '\\' not in substr:
+        return space.newbytes(substr)
+
+    v, first_escape_error_char = _PyString_DecodeEscape(
+        space, substr, 'strict', encoding)
+    if first_escape_error_char != '':
+        msg = "invalid escape sequence '%s'"
+        if astbuilder:
+            astbuilder.deprecation_warn(msg % first_escape_error_char, token)
+
     return space.newbytes(v)
 
 def decode_unicode_utf8(space, s, ps, q):
@@ -99,12 +146,14 @@ def decode_unicode_utf8(space, s, ps, q):
         if s[ps] == '\\':
             lis.append(s[ps])
             ps += 1
-            if ord(s[ps]) & 0x80:
+            if ps >= end or ord(s[ps]) & 0x80:
                 # A multibyte sequence will follow, it will be
                 # escaped like \u1234. To avoid confusion with
                 # the backslash we just wrote, we emit "\u005c"
                 # instead.
                 lis.append("u005c")
+                if ps >= end:
+                    break
         if ord(s[ps]) & 0x80:
             cp = rutf8.codepoint_at_pos(s, ps)
             hexa = hex(cp + 0x10000000)
@@ -116,7 +165,7 @@ def decode_unicode_utf8(space, s, ps, q):
             ps += 1
     return ''.join(lis)
 
-def PyString_DecodeEscape(space, s, errors, recode_encoding):
+def _PyString_DecodeEscape(space, s, errors, recode_encoding):
     """
     Unescape a backslash-escaped string. If recode_encoding is non-zero,
     the string is UTF-8 encoded and should be re-encoded in the
@@ -125,6 +174,7 @@ def PyString_DecodeEscape(space, s, errors, recode_encoding):
     builder = StringBuilder(len(s))
     ps = 0
     end = len(s)
+    first_escape_error_char = ''
     while ps < end:
         if s[ps] != '\\':
             # note that the C code has a label here.
@@ -186,7 +236,8 @@ def PyString_DecodeEscape(space, s, errors, recode_encoding):
                 ps += 2
             else:
                 if errors == 'strict':
-                    raise_app_valueerror(space, 'invalid \\x escape')
+                    raise_app_valueerror(
+                        space, "invalid \\x escape at position %d" % (ps - 2))
                 elif errors == 'replace':
                     builder.append('?')
                 elif errors == 'ignore':
@@ -203,12 +254,37 @@ def PyString_DecodeEscape(space, s, errors, recode_encoding):
             builder.append('\\')
             ps -= 1
             assert ps >= 0
+            if first_escape_error_char == '':
+                first_escape_error_char = ch
             continue
             # an arbitry number of unescaped UTF-8 bytes may follow.
 
     buf = builder.build()
-    return buf
+    return buf, first_escape_error_char
 
+
+def PyString_DecodeEscape(space, s, errors, recode_encoding):
+    buf, first_escape_error_char = _PyString_DecodeEscape(space, s, errors, recode_encoding)
+    if first_escape_error_char != '':
+        msg = "invalid escape sequence '%s'"
+        space.warn(space.newtext(msg % first_escape_error_char), space.w_DeprecationWarning)
+    return buf, first_escape_error_char
+
+
+def decode_unicode_escape(space, string, astbuilder, token):
+    from pypy.interpreter.unicodehelper import str_decode_unicode_escape
+    from pypy.module._codecs import interp_codecs
+    state = space.fromcache(interp_codecs.CodecState)
+    unicodedata_handler = state.get_unicodedata_handler(space)
+    s, ulen, blen, first_escape_error_char = str_decode_unicode_escape(
+        string, "strict",
+        final=True,
+        errorhandler=state.decode_error_handler,
+        ud_handler=unicodedata_handler)
+    if first_escape_error_char is not None and astbuilder is not None:
+        msg = "invalid escape sequence '%s'"
+        astbuilder.deprecation_warn(msg % first_escape_error_char, token)
+    return s, ulen, blen
 
 def isxdigit(ch):
     return (ch >= '0' and ch <= '9' or

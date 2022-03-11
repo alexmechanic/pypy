@@ -154,9 +154,9 @@ def multibytecodec_decerror(decodebuf, e, errors,
         replace = UNICODE_REPLACEMENT_CHARACTER
     else:
         assert errorcb
-        replace, end = errorcb(errors, namecb, reason,
+        replace, end, rettype, obj = errorcb(errors, namecb, reason,
                                stringdata, start, end)
-        # 'replace' is RPython unicode here
+        # 'replace' is UTF8 encoded unicode, rettype is 'u'
     lgt = rutf8.codepoints_in_utf8(replace)
     inbuf = rffi.utf82wcharp(replace, lgt)
     try:
@@ -263,19 +263,20 @@ def multibytecodec_encerror(encodebuf, e, errors,
         raise EncodeDecodeError(start, end, reason)
     elif errors == "ignore":
         replace = ""
+        rettype = 'b'   # != 'u'
     elif errors == "replace":
         replace = "?"    # utf-8 unicode
+        rettype = 'u'
     else:
         assert errorcb
-        replace, end = errorcb(errors, namecb, reason,
+        replace, end, rettype, obj = errorcb(errors, namecb, reason,
                             unicodedata, start, end)
-    if len(replace) > 0:
+    if rettype == 'u':
         codec = pypy_cjk_enc_getcodec(encodebuf)
-        lgt = rutf8.codepoints_in_utf8(replace)
+        lgt = rutf8.check_utf8(replace, False)
         replace = encode(codec, replace, lgt, copystate=encodebuf)
     #else:
-    #   replace is an empty utf-8 unicode, which we directly consider to
-    #   encode as an empty byte string.
+    #   replace is meant to be a byte string already
     with rffi.scoped_nonmovingbuffer(replace) as inbuf:
         r = pypy_cjk_enc_replace_on_error(encodebuf, inbuf, len(replace), end)
     if r == MBERR_NOMEMORY:

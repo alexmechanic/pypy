@@ -1,7 +1,9 @@
 """The builtin bytearray implementation"""
 
+import sys
 from rpython.rlib.objectmodel import (
     import_from_mixin, newlist_hint, resizelist_hint, specialize)
+from rpython.rlib.rarithmetic import intmask
 from rpython.rlib.rstring import StringBuilder, ByteListBuilder
 from rpython.rlib.debug import check_list_of_chars, check_nonneg
 from rpython.rtyper.lltypesystem import rffi
@@ -13,14 +15,16 @@ from rpython.rlib.buffer import (GCBuffer,
                                  get_gc_data_offset_for_list_of_chars)
 from pypy.interpreter.baseobjspace import W_Root
 from pypy.interpreter.error import OperationError, oefmt
+from pypy.objspace.std.bytesobject import makebytesdata_w, newbytesdata_w
 from pypy.interpreter.gateway import WrappedDefault, interp2app, unwrap_spec
 from pypy.interpreter.typedef import TypeDef
 from pypy.interpreter.buffer import SimpleView
 from pypy.objspace.std.sliceobject import W_SliceObject, unwrap_start_stop
-from pypy.objspace.std.stringmethods import StringMethods, _get_buffer
+from pypy.objspace.std.stringmethods import StringMethods
 from pypy.objspace.std.stringmethods import _descr_getslice_slowpath
 from pypy.objspace.std.bytesobject import W_BytesObject
 from pypy.objspace.std.util import get_positive_index
+from pypy.objspace.std.formatting import mod_format, FORMAT_BYTEARRAY
 
 
 class W_BytearrayObject(W_Root):
@@ -48,16 +52,7 @@ class W_BytearrayObject(W_Root):
                            ''.join(self._data[self._offset:]))
 
     def buffer_w(self, space, flags):
-        return SimpleView(BytearrayBuffer(self))
-
-    def readbuf_w(self, space):
-        return BytearrayBuffer(self, readonly=True)
-
-    def writebuf_w(self, space):
-        return BytearrayBuffer(self)
-
-    def charbuf_w(self, space):
-        return ''.join(self.getdata())
+        return SimpleView(BytearrayBuffer(self), w_obj=self)
 
     def bytearray_list_of_chars_w(self, space):
         return self.getdata()
@@ -107,10 +102,16 @@ class W_BytearrayObject(W_Root):
         return False
 
     @staticmethod
-    def _op_val(space, w_other, strict=None):
-        # bytearray does not enforce the strict restriction (on strip at least)
-        if isinstance(w_other, W_BytesObject):
-            return w_other.str_w(space)
+    def _op_val(space, w_other, allow_char=False):
+        # Some functions (contains, find) allow a number to specify a
+        # single char.
+        if allow_char and space.isinstance_w(w_other, space.w_int):
+            return StringMethods._single_char(space, w_other)
+        try:
+            return space.bytes_w(w_other)
+        except OperationError as e:
+            if not e.match(space, space.w_TypeError):
+                raise
         return space.buffer_w(w_other, space.BUF_SIMPLE).as_str()
 
     def _chr(self, char):
@@ -172,12 +173,6 @@ class W_BytearrayObject(W_Root):
     def _join_return_one(self, space, w_obj):
         return False
 
-    def _join_check_item(self, space, w_obj):
-        if (space.isinstance_w(w_obj, space.w_bytes) or
-            space.isinstance_w(w_obj, space.w_bytearray)):
-            return 0
-        return 1
-
     def ord(self, space):
         length = self._len()
         if length != 1:
@@ -206,50 +201,34 @@ class W_BytearrayObject(W_Root):
 
     @staticmethod
     def descr_fromhex(space, w_bytearraytype, w_hexstring):
-        hexstring = space.text_w(w_hexstring)
+        if not space.is_w(space.type(w_hexstring), space.w_unicode):
+            raise oefmt(space.w_TypeError, "must be str, not %T", w_hexstring)
+        hexstring = space.utf8_w(w_hexstring)
         data = _hexstring_to_array(space, hexstring)
         # in CPython bytearray.fromhex is a staticmethod, so
         # we ignore w_type and always return a bytearray
-        return new_bytearray(space, space.w_bytearray, data)
+        w_result = new_bytearray(space, space.w_bytearray, data)
+        if w_bytearraytype is not space.w_bytearray:
+            w_result = space.call_function(w_bytearraytype, w_result)
+        return w_result
 
     @unwrap_spec(encoding='text_or_none', errors='text_or_none')
     def descr_init(self, space, w_source=None, encoding=None, errors=None):
-        if w_source is None:
-            w_source = space.newbytes('')
-        if encoding is not None:
-            from pypy.objspace.std.unicodeobject import encode_object
-            # if w_source is an integer this correctly raises a
-            # TypeError the CPython error message is: "encoding or
-            # errors without a string argument" ours is: "expected
-            # unicode, got int object"
-            w_source = encode_object(space, w_source, encoding, errors)
-
-        # Is it an integer?
-        # Note that we're calling space.getindex_w() instead of space.int_w().
-        try:
-            count = space.getindex_w(w_source, space.w_OverflowError)
-        except OperationError as e:
-            if not e.match(space, space.w_TypeError):
-                raise
-        else:
-            if count < 0:
-                raise oefmt(space.w_ValueError, "bytearray negative count")
-            self._data = resizable_list_supporting_raw_ptr(['\0'] * count)
-            self._offset = 0
-            return
-
-        data = makebytearraydata_w(space, w_source)
+        assert isinstance(self, W_BytearrayObject)
+        data = [c for c in newbytesdata_w(space, w_source, encoding, errors)]
         self._data = resizable_list_supporting_raw_ptr(data)
         self._offset = 0
         _tweak_for_tests(self)
 
     def descr_repr(self, space):
         s, start, end, _ = self._convert_idx_params(space, None, None)
+        cls_name = space.type(self).getname(space)
 
         # Good default if there are no replacements.
-        buf = StringBuilder(len("bytearray(b'')") + (end - start))
+        buf = StringBuilder(len(cls_name) + len("(b'')") + (end - start))
 
-        buf.append("bytearray(b")
+        buf.append(cls_name)
+        buf.append("(b")
         quote = "'"
         for i in range(start, end):
             c = s[i]
@@ -286,14 +265,17 @@ class W_BytearrayObject(W_Root):
         return space.newtext(buf.build())
 
     def descr_str(self, space):
-        return space.newtext(''.join(self.getdata()))
+        if space.sys.get_flag('bytes_warning'):
+            space.warn(space.newtext("str() on a bytearray instance"),
+                       space.w_BytesWarning)
+        return self.descr_repr(space)
 
     def descr_eq(self, space, w_other):
         if isinstance(w_other, W_BytearrayObject):
             return space.newbool(self.getdata() == w_other.getdata())
 
         try:
-            buffer = _get_buffer(space, w_other)
+            buffer = space.readbuf_w(w_other)
         except OperationError as e:
             if e.match(space, space.w_TypeError):
                 return space.w_NotImplemented
@@ -313,7 +295,7 @@ class W_BytearrayObject(W_Root):
             return space.newbool(self.getdata() != w_other.getdata())
 
         try:
-            buffer = _get_buffer(space, w_other)
+            buffer = space.readbuf_w(w_other)
         except OperationError as e:
             if e.match(space, space.w_TypeError):
                 return space.w_NotImplemented
@@ -336,12 +318,12 @@ class W_BytearrayObject(W_Root):
             other_len = len(other)
             cmp = _memcmp(value, other, min(len(value), len(other)))
         elif isinstance(w_other, W_BytesObject):
-            other = w_other.str_w(space)
+            other = w_other.bytes_w(space)
             other_len = len(other)
             cmp = _memcmp(value, other, min(len(value), len(other)))
         else:
             try:
-                buffer = _get_buffer(space, w_other)
+                buffer = space.readbuf_w(w_other)
             except OperationError as e:
                 if e.match(space, space.w_TypeError):
                     return False, 0, 0
@@ -375,8 +357,11 @@ class W_BytearrayObject(W_Root):
             return space.w_NotImplemented
         return space.newbool(cmp > 0 or (cmp == 0 and self._len() >= other_len))
 
-    def descr_iter(self, space):
-        return space.newseqiter(self)
+    def descr_isascii(self, space):
+        for i in self._data[self._offset:]:
+            if ord(i) > 127:
+                return space.w_False
+        return space.w_True
 
     def descr_inplace_add(self, space, w_other):
         if isinstance(w_other, W_BytearrayObject):
@@ -399,7 +384,7 @@ class W_BytearrayObject(W_Root):
 
     def descr_setitem(self, space, w_index, w_other):
         if isinstance(w_index, W_SliceObject):
-            sequence2 = makebytearraydata_w(space, w_other)
+            sequence2 = makebytesdata_w(space, w_other)
             oldsize = self._len()
             start, stop, step, slicelength = w_index.indices4(space, oldsize)
             if start == 0 and step == 1 and len(sequence2) <= slicelength:
@@ -412,8 +397,7 @@ class W_BytearrayObject(W_Root):
             _setitem_slice_helper(space, data, start, step,
                                   slicelength, sequence2, empty_elem='\x00')
         else:
-            idx = space.getindex_w(w_index, space.w_IndexError,
-                                   "bytearray index")
+            idx = space.getindex_w(w_index, space.w_IndexError, "bytearray")
             newvalue = space.byte_w(w_other)
             self._data[self._fixindex(space, idx)] = newvalue
 
@@ -426,8 +410,7 @@ class W_BytearrayObject(W_Root):
                 _delitem_slice_helper(space, self._data,
                                       start + self._offset, step, slicelength)
         else:
-            idx = space.getindex_w(w_idx, space.w_IndexError,
-                                   "bytearray index")
+            idx = space.getindex_w(w_idx, space.w_IndexError, "bytearray")
             idx = self._fixindex(space, idx)
             if idx == self._offset:    # fast path for del x[0] or del[-len]
                 self._delete_from_start(1)
@@ -447,9 +430,9 @@ class W_BytearrayObject(W_Root):
         if isinstance(w_other, W_BytearrayObject):
             self._data += w_other.getdata()
         elif isinstance(w_other, W_BytesObject):    # performance only
-            self._data += w_other.str_w(space)
+            self._data += w_other.bytes_w(space)
         else:
-            self._data += makebytearraydata_w(space, w_other)
+            self._data += makebytesdata_w(space, w_other)
 
     def descr_insert(self, space, w_idx, w_other):
         where = space.int_w(w_idx)
@@ -476,14 +459,6 @@ class W_BytearrayObject(W_Root):
                 return
         raise oefmt(space.w_ValueError, "value not found in bytearray")
 
-    _StringMethods_descr_contains = descr_contains
-    def descr_contains(self, space, w_sub):
-        if space.isinstance_w(w_sub, space.w_int):
-            char = space.int_w(w_sub)
-            return _descr_contains_bytearray(self.getdata(), space, char)
-
-        return self._StringMethods_descr_contains(space, w_sub)
-
     def descr_add(self, space, w_other):
         if isinstance(w_other, W_BytearrayObject):
             return self._new(self.getdata() + w_other.getdata())
@@ -498,6 +473,52 @@ class W_BytearrayObject(W_Root):
 
     def descr_reverse(self, space):
         self.getdata().reverse()
+
+    def descr_clear(self, space):
+        self._data = []
+        self._offset = 0
+
+    def descr_copy(self, space):
+        return self._new(self._data[self._offset:])
+
+    def descr_hex(self, space, w_sep=None, w_bytes_per_sep=None):
+        """
+        Create a str of hexadecimal numbers from a bytearray object.
+
+          sep
+            An optional single character or byte to separate hex bytes.
+          bytes_per_sep
+            How many bytes between separators.  Positive values count from the
+            right, negative values count from the left.
+
+        Example:
+        >>> value = bytearray([0xb9, 0x01, 0xef])
+        >>> value.hex()
+        'b901ef'
+        >>> value.hex(':')
+        'b9:01:ef'
+        >>> value.hex(':', 2)
+        'b9:01ef'
+        >>> value.hex(':', -2)
+        'b901:ef'
+        """
+        sep, bytes_per_sep = unwrap_hex_sep_arguments(space, w_sep, w_bytes_per_sep)
+        data = self.getdata()
+        return _array_to_hexstring(space, data, 0, 1, len(data), True,
+                sep=sep, bytes_per_sep=bytes_per_sep)
+
+    def descr_mod(self, space, w_values):
+        return mod_format(space, self, w_values, fmt_type=FORMAT_BYTEARRAY)
+
+    def descr_rmod(self, space, w_value):
+        if not isinstance(w_value, W_BytearrayObject):
+            return space.w_NotImplemented
+        return mod_format(space, w_value, self, fmt_type=FORMAT_BYTEARRAY)
+
+    @staticmethod
+    def _iter_getitem_result(self, space, index):
+        assert isinstance(self, W_BytearrayObject)
+        return self._getitem_result(space, index)
 
     def descr_alloc(self, space):
         return space.newint(len(self._data) + 1)   # includes the _offset part
@@ -533,15 +554,6 @@ class W_BytearrayObject(W_Root):
 def _make_data(s):
     return [s[i] for i in range(len(s))]
 
-
-def _descr_contains_bytearray(data, space, char):
-    if not 0 <= char < 256:
-        raise oefmt(space.w_ValueError, "byte must be in range(0, 256)")
-    for c in data:
-        if ord(c) == char:
-            return space.w_True
-    return space.w_False
-
 # ____________________________________________________________
 
 
@@ -549,54 +561,6 @@ def new_bytearray(space, w_bytearraytype, data):
     w_obj = space.allocate_instance(W_BytearrayObject, w_bytearraytype)
     W_BytearrayObject.__init__(w_obj, data)
     return w_obj
-
-
-def makebytearraydata_w(space, w_source):
-    # String-like argument
-    try:
-        buf = space.buffer_w(w_source, space.BUF_FULL_RO)
-    except OperationError as e:
-        if not e.match(space, space.w_TypeError):
-            raise
-    else:
-        return list(buf.as_str())
-    return _from_byte_sequence(space, w_source)
-
-def _get_printable_location(greenkey):
-    return ('bytearray_from_byte_sequence [%s]' %
-            greenkey.iterator_greenkey_printable())
-
-_byteseq_jitdriver = jit.JitDriver(
-    name='bytearray_from_byte_sequence',
-    greens=['greenkey'],
-    reds='auto',
-    get_printable_location=_get_printable_location)
-
-def _from_byte_sequence(space, w_source):
-    # Split off in a separate function for the JIT's benefit
-    # and add a jitdriver with the type of w_iter as the green key
-    w_iter = space.iter(w_source)
-    length_hint = space.length_hint(w_source, 0)
-    data = newlist_hint(length_hint)
-    #
-    _from_byte_sequence_loop(space, w_iter, data)
-    #
-    extended = len(data)
-    if extended < length_hint:
-        resizelist_hint(data, extended)
-    return data
-
-def _from_byte_sequence_loop(space, w_iter, data):
-    greenkey = space.iterator_greenkey(w_iter)
-    while True:
-        _byteseq_jitdriver.jit_merge_point(greenkey=greenkey)
-        try:
-            w_item = space.next(w_iter)
-        except OperationError as e:
-            if not e.match(space, space.w_StopIteration):
-                raise
-            break
-        data.append(space.byte_w(w_item))
 
 
 def _hex_digit_to_int(d):
@@ -616,7 +580,7 @@ def _hexstring_to_array(space, s):
     length = len(s)
     i = 0
     while True:
-        while i < length and s[i] == ' ':
+        while i < length and s[i].isspace():
             i += 1
         if i >= length:
             break
@@ -633,6 +597,80 @@ def _hexstring_to_array(space, s):
         i += 2
     return data
 
+HEXDIGITS = "0123456789abcdef"
+PY_SIZE_T_MAX = intmask(2**(rffi.sizeof(rffi.SIZE_T)*8-1)-1)
+
+def unwrap_hex_sep_arguments(space, w_sep, w_bytes_per_sep):
+    if w_sep is not None:
+        if space.isinstance_w(w_sep, space.w_unicode):
+            sep = space.text_w(w_sep)
+        elif space.isinstance_w(w_sep, space.w_bytes):
+            sep = space.bytes_w(w_sep)
+        else:
+            raise oefmt(space.w_TypeError, "sep must be str of bytes")
+        if w_bytes_per_sep is None:
+            bytes_per_sep = 1
+        else:
+            bytes_per_sep = space.int_w(w_bytes_per_sep)
+    else:
+        sep = None
+        bytes_per_sep = 0
+    return sep, bytes_per_sep
+
+
+@specialize.arg(5) # raw access
+def _array_to_hexstring(space, buf, start, step, length, rawaccess=False, sep=None, bytes_per_sep=0):
+    from rpython.rlib.rutf8 import check_ascii, CheckError
+    if sep is not None:
+        try:
+            check_ascii(sep)
+        except CheckError:
+            raise oefmt(space.w_ValueError, "sep must be ASCII.")
+        if len(sep) != 1:
+            raise oefmt(space.w_ValueError, "sep must be length 1.")
+    else:
+        bytes_per_sep = 0
+    hexstring = StringBuilder(length*2)
+
+    if length > PY_SIZE_T_MAX/2:
+        raise OperationError(space.w_MemoryError, space.w_None)
+
+    if bytes_per_sep == 1:
+        bytes_per_sep_prefix = 1
+
+    elif bytes_per_sep > 1:
+        bytes_per_sep_prefix = length % bytes_per_sep
+        if bytes_per_sep_prefix == 0:
+            bytes_per_sep_prefix = bytes_per_sep
+    elif bytes_per_sep < 0:
+        bytes_per_sep_prefix = -bytes_per_sep
+        bytes_per_sep = -bytes_per_sep
+    else:
+        assert bytes_per_sep == 0
+        bytes_per_sep_prefix = -1 # disable separators
+
+    sep_counter = bytes_per_sep_prefix
+
+    stepped = 0
+    i = start
+    while stepped < length:
+        if rawaccess:
+            byte = ord(buf[i])
+        else:
+            byte = ord(buf.getitem(i))
+        c = (byte >> 4 & 0xf)
+        hexstring.append(HEXDIGITS[c])
+        c = (byte & 0xf)
+        hexstring.append(HEXDIGITS[c])
+        i += step
+        stepped += 1
+        sep_counter -= 1
+        if sep_counter == 0 and sep is not None and stepped != length:
+            hexstring.append(sep)
+            sep_counter = bytes_per_sep
+
+    s = hexstring.build()
+    return space.newtext(s, len(s)) # we know it's ASCII
 
 class BytearrayDocstrings:
     """bytearray(iterable_of_ints) -> bytearray
@@ -658,7 +696,9 @@ class BytearrayDocstrings:
     def __alloc__():
         """B.__alloc__() -> int
 
-        Return the number of bytes actually allocated.
+        CPython compatibility: return len(B) + 1.
+        (The allocated size might be bigger, but getting it is
+        involved and may create pointless compatibility troubles.)
         """
 
     def __contains__():
@@ -689,7 +729,7 @@ class BytearrayDocstrings:
         """x.__imul__(y) <==> x*=y"""
 
     def __init__():
-        """x.__init__(...) initializes x; see help(type(x)) for signature"""
+        """Initialize self.  See help(type(self)) for accurate signature."""
 
     def __iter__():
         """x.__iter__() <==> iter(x)"""
@@ -705,6 +745,12 @@ class BytearrayDocstrings:
 
     def __mul__():
         """x.__mul__(n) <==> x*n"""
+
+    def __mod__():
+        """Return self%value."""
+
+    def __rmod__():
+        """Return value%self."""
 
     def __ne__():
         """x.__ne__(y) <==> x!=y"""
@@ -748,6 +794,18 @@ class BytearrayDocstrings:
 
         Return B centered in a string of length width.  Padding is
         done using the specified fill character (default is a space).
+        """
+
+    def clear():
+        """B.clear() -> None
+
+        Remove all items from B.
+        """
+
+    def copy():
+        """B.copy() -> bytearray
+
+        Return a copy of B.
         """
 
     def count():
@@ -835,6 +893,12 @@ class BytearrayDocstrings:
         Return True if all characters in B are alphabetic
         and there is at least one character in B, False otherwise.
         """
+
+    def isascii():
+        """B.isascii() -> bool
+
+        Return true if the string is empty or all characters in the string are ASCII, false otherwise.
+        ASCII characters have code points in the range U+0000-U+007F."""
 
     def isdigit():
         """B.isdigit() -> bool
@@ -1056,6 +1120,27 @@ class BytearrayDocstrings:
         of the specified width.  B is never truncated.
         """
 
+    def hex():
+        """B.hex() -> unicode
+
+        Return a string object containing two hexadecimal digits
+        for each byte in the instance B.
+        """
+
+    def removeprefix():
+        """Return a bytearray with the given prefix string removed if present.
+
+        If the bytearray starts with the prefix string, return
+        bytearray[len(prefix):].  Otherwise, return a copy of the original
+        bytearray."""
+
+    def removesuffix():
+        """Return a bytearray with the given suffix string removed if present.
+
+        If the bytearray ends with the suffix string and that suffix is not
+        empty, return bytearray[:-len(suffix)].  Otherwise, return a copy of
+        the original bytearray."""
+
 
 W_BytearrayObject.typedef = TypeDef(
     "bytearray", None, None, "read-write",
@@ -1066,6 +1151,8 @@ W_BytearrayObject.typedef = TypeDef(
                             doc=BytearrayDocstrings.__reduce__.__doc__),
     fromhex = interp2app(W_BytearrayObject.descr_fromhex, as_classmethod=True,
                          doc=BytearrayDocstrings.fromhex.__doc__),
+    maketrans = interp2app(W_BytearrayObject.descr_maketrans,
+                           as_classmethod=True),
 
     __repr__ = interp2app(W_BytearrayObject.descr_repr,
                           doc=BytearrayDocstrings.__repr__.__doc__),
@@ -1124,6 +1211,8 @@ W_BytearrayObject.typedef = TypeDef(
                          doc=BytearrayDocstrings.isalnum.__doc__),
     isalpha = interp2app(W_BytearrayObject.descr_isalpha,
                          doc=BytearrayDocstrings.isalpha.__doc__),
+    isascii = interp2app(W_BytearrayObject.descr_isascii,
+                         doc=BytearrayDocstrings.isascii.__doc__),
     isdigit = interp2app(W_BytearrayObject.descr_isdigit,
                          doc=BytearrayDocstrings.isdigit.__doc__),
     islower = interp2app(W_BytearrayObject.descr_islower,
@@ -1186,6 +1275,10 @@ W_BytearrayObject.typedef = TypeDef(
                              doc=BytearrayDocstrings.__setitem__.__doc__),
     __delitem__ = interp2app(W_BytearrayObject.descr_delitem,
                              doc=BytearrayDocstrings.__delitem__.__doc__),
+    __mod__ = interp2app(W_BytearrayObject.descr_mod,
+                           doc=BytearrayDocstrings.__mod__.__doc__),
+    __rmod__ = interp2app(W_BytearrayObject.descr_rmod,
+                           doc=BytearrayDocstrings.__rmod__.__doc__),
 
     append = interp2app(W_BytearrayObject.descr_append,
                         doc=BytearrayDocstrings.append.__doc__),
@@ -1199,8 +1292,20 @@ W_BytearrayObject.typedef = TypeDef(
                         doc=BytearrayDocstrings.remove.__doc__),
     reverse = interp2app(W_BytearrayObject.descr_reverse,
                          doc=BytearrayDocstrings.reverse.__doc__),
+    clear = interp2app(W_BytearrayObject.descr_clear,
+                       doc=BytearrayDocstrings.clear.__doc__),
+    copy = interp2app(W_BytearrayObject.descr_copy,
+                         doc=BytearrayDocstrings.copy.__doc__),
+    hex = interp2app(W_BytearrayObject.descr_hex,
+                           doc=BytearrayDocstrings.hex.__doc__),
     __alloc__ = interp2app(W_BytearrayObject.descr_alloc,
                            doc=BytearrayDocstrings.__alloc__.__doc__),
+
+    removeprefix = interp2app(W_BytearrayObject.descr_removeprefix,
+                              doc=BytearrayDocstrings.removeprefix.__doc__),
+
+    removesuffix = interp2app(W_BytearrayObject.descr_removesuffix,
+                              doc=BytearrayDocstrings.removesuffix.__doc__),
 )
 W_BytearrayObject.typedef.flag_sequence_bug_compat = True
 

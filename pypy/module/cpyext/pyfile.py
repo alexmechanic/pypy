@@ -1,14 +1,11 @@
 from rpython.rtyper.lltypesystem import rffi, lltype
-from rpython.rlib.rfile import c_setvbuf, _IONBF
+from rpython.rlib.rarithmetic import widen
 from pypy.module.cpyext.api import (
-    cpython_api, CANNOT_FAIL, CONST_STRING, FILEP, build_type_checkers, c_fdopen)
+    cpython_api, CONST_STRING, FILEP)
 from pypy.module.cpyext.pyobject import PyObject
 from pypy.module.cpyext.object import Py_PRINT_RAW
-from pypy.interpreter.error import (OperationError, oefmt, 
-    exception_from_saved_errno)
-from pypy.module._file.interp_file import W_File
-
-PyFile_Check, PyFile_CheckExact = build_type_checkers("File", W_File)
+from pypy.module._io import interp_io
+from pypy.interpreter.error import OperationError, oefmt
 
 @cpython_api([PyObject, rffi.INT_real], PyObject)
 def PyFile_GetLine(space, w_obj, n):
@@ -44,53 +41,41 @@ def PyFile_FromString(space, filename, mode):
     semantics as the standard C routine fopen().  On failure, return NULL."""
     w_filename = space.newbytes(rffi.charp2str(filename))
     w_mode = space.newtext(rffi.charp2str(mode))
-    return space.call_method(space.builtin, 'file', w_filename, w_mode)
+    return space.call_method(space.builtin, 'open', w_filename, w_mode)
 
-@cpython_api([PyObject], FILEP, error=lltype.nullptr(FILEP.TO))
-def PyFile_AsFile(space, w_p):
-    """Return the file object associated with p as a FILE*.
-    
-    If the caller will ever use the returned FILE* object while
-    the GIL is released it must also call the PyFile_IncUseCount() and
-    PyFile_DecUseCount() functions as appropriate."""
-    if not PyFile_Check(space, w_p):
-        raise oefmt(space.w_IOError, 'first argument must be an open file')
-    assert isinstance(w_p, W_File)
-    w_p.stream.flush_buffers()
-    try:
-        fd = space.int_w(space.call_method(w_p, 'fileno'))
-        mode = w_p.mode
-    except OperationError as e:
-        raise oefmt(space.w_IOError, 'could not call fileno') 
-    if (fd < 0 or not mode or mode[0] not in ['r', 'w', 'a', 'U'] or
-        ('U' in mode and ('w' in mode or 'a' in mode))):
-        raise oefmt(space.w_IOError, 'invalid fileno or mode') 
-    ret = c_fdopen(fd, mode)
-    if not ret:
-        raise exception_from_saved_errno(space, space.w_IOError)
-    # XXX fix this once use-file-star-for-file lands
-    c_setvbuf(ret, lltype.nullptr(rffi.CCHARP.TO), _IONBF, 0)
-    return ret
+@cpython_api([rffi.INT_real, CONST_STRING, CONST_STRING, rffi.INT_real, CONST_STRING, CONST_STRING, CONST_STRING, rffi.INT_real], PyObject)
+def PyFile_FromFd(space, fd, name, mode, buffering, encoding, errors, newline, closefd):
+    """Create a Python file object from the file descriptor of an already
+    opened file fd.  The arguments name, encoding, errors and newline
+    can be NULL to use the defaults; buffering can be -1 to use the
+    default. name is ignored and kept for backward compatibility. Return
+    NULL on failure. For a more comprehensive description of the arguments,
+    please refer to the io.open() function documentation.
 
-@cpython_api([FILEP, CONST_STRING, CONST_STRING, rffi.VOIDP], PyObject)
-def PyFile_FromFile(space, fp, name, mode, close):
-    """Create a new PyFileObject from the already-open standard C file
-    pointer, fp.  The function close will be called when the file should be
-    closed.  Return NULL on failure."""
-    if close:
-        raise oefmt(space.w_NotImplementedError, 
-            'PyFromFile(..., close) with close function not implemented')
-    w_ret = space.allocate_instance(W_File, space.gettypefor(W_File))
-    w_ret.w_name = space.newtext(rffi.charp2str(name))
-    w_ret.check_mode_ok(rffi.charp2str(mode))
-    w_ret.fp = fp
+    Since Python streams have their own buffering layer, mixing them with
+    OS-level file descriptors can produce various issues (such as unexpected
+    ordering of data).
+
+    Ignore name attribute."""
+
+    if not mode:
+        raise oefmt(space.w_ValueError, "mode is required")
+    mode = rffi.charp2str(mode)
+    if encoding:
+        encoding_ = rffi.charp2str(encoding)
+    else:
+        encoding_ = None
+    if errors:
+        errors_ = rffi.charp2str(errors)
+    else:
+        errors_ = None
+    if newline:
+        newline_ = rffi.charp2str(newline)
+    else:
+        newline_ = None
+    w_ret = interp_io.open(space, space.newint(fd), mode, widen(buffering),
+                           encoding_, errors_, newline_, widen(closefd))
     return w_ret
-
-@cpython_api([PyObject, rffi.INT_real], lltype.Void)
-def PyFile_SetBufSize(space, w_file, n):
-    """Available on systems with setvbuf() only.  This should only be called
-    immediately after file object creation."""
-    raise NotImplementedError
 
 @cpython_api([CONST_STRING, PyObject], rffi.INT_real, error=-1)
 def PyFile_WriteString(space, s, w_p):
@@ -115,31 +100,24 @@ def PyFile_WriteObject(space, w_obj, w_p, flags):
     return 0
 
 @cpython_api([PyObject], PyObject)
-def PyFile_Name(space, w_p):
-    """Return the name of the file specified by p as a string object."""
-    w_name = space.getattr(w_p, space.newtext("name"))
-    return w_name     # borrowed ref, should be a W_StringObject from the file
-
-@cpython_api([PyObject, rffi.INT_real], rffi.INT_real, error=CANNOT_FAIL)
-def PyFile_SoftSpace(space, w_p, newflag):
+def PyOS_FSPath(space, w_path):
     """
-    This function exists for internal use by the interpreter.  Set the
-    softspace attribute of p to newflag and return the previous value.
-    p does not have to be a file object for this function to work
-    properly; any object is supported (thought its only interesting if
-    the softspace attribute can be set).  This function clears any
-    errors, and will return 0 as the previous value if the attribute
-    either does not exist or if there were errors in retrieving it.
-    There is no way to detect errors from this function, but doing so
-    should not be needed."""
-    try:
-        if rffi.cast(lltype.Signed, newflag):
-            w_newflag = space.w_True
-        else:
-            w_newflag = space.w_False
-        oldflag = space.int_w(space.getattr(w_p, space.newtext("softspace")))
-        space.setattr(w_p, space.newtext("softspace"), w_newflag)
-        return oldflag
-    except OperationError as e:
-        return 0
+    Return the file system representation for path. If the object is a str or
+    bytes object, then its reference count is incremented. If the object
+    implements the os.PathLike interface, then __fspath__() is returned as long
+    as it is a str or bytes object. Otherwise TypeError is raised and NULL is
+    returned.
+    """
+    if (space.isinstance_w(w_path, space.w_unicode) or
+        space.isinstance_w(w_path, space.w_bytes)):
+        return w_path
+    if not space.lookup(w_path, '__fspath__'):
+        raise oefmt(space.w_TypeError,
+                "expected str, bytes or os.PathLike object, not %T", w_path)
+    w_ret = space.call_method(w_path, '__fspath__')
+    if (space.isinstance_w(w_ret, space.w_unicode) or
+        space.isinstance_w(w_ret, space.w_bytes)):
+        return w_ret
+    raise oefmt(space.w_TypeError,
+                "expected %T.__fspath__() to return str or bytes, not %T", w_path, w_ret)
 

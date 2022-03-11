@@ -3,6 +3,8 @@ from pypy.interpreter.mixedmodule import MixedModule
 import os
 
 class Module(MixedModule):
+    applevel_name = '_signal'
+
     interpleveldefs = {
         'signal':              'interp_signal.signal',
         'getsignal':           'interp_signal.getsignal',
@@ -12,6 +14,9 @@ class Module(MixedModule):
         'SIG_IGN':             'space.wrap(interp_signal.SIG_IGN)',
         'default_int_handler': 'interp_signal.default_int_handler',
         'ItimerError':         'interp_signal.get_itimer_error(space)',
+        'valid_signals':       'interp_signal.valid_signals',
+        'raise_signal':        'interp_signal.raise_signal',
+        'strsignal':           'interp_signal.strsignal'
     }
 
     if os.name == 'posix':
@@ -24,6 +29,15 @@ class Module(MixedModule):
         interpleveldefs['getitimer'] = 'interp_signal.getitimer'
         for name in ['ITIMER_REAL', 'ITIMER_VIRTUAL', 'ITIMER_PROF']:
             interpleveldefs[name] = 'space.wrap(interp_signal.%s)' % (name,)
+
+    if os.name == 'posix':
+        interpleveldefs['sigwait'] = 'interp_signal.sigwait'
+        interpleveldefs['sigpending'] = 'interp_signal.sigpending'
+        interpleveldefs['pthread_kill'] = 'interp_signal.pthread_kill'
+        interpleveldefs['pthread_sigmask'] = 'interp_signal.pthread_sigmask'
+        interpleveldefs['SIG_BLOCK'] = 'space.wrap(interp_signal.SIG_BLOCK)'
+        interpleveldefs['SIG_UNBLOCK'] = 'space.wrap(interp_signal.SIG_UNBLOCK)'
+        interpleveldefs['SIG_SETMASK'] = 'space.wrap(interp_signal.SIG_SETMASK)'
 
     appleveldefs = {
     }

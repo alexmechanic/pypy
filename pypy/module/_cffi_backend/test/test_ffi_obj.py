@@ -246,7 +246,7 @@ class AppTestFFIObj:
                                 "       ^")
         e = raises(ffi.error, ffi.cast, "\t\n\x01\x1f~\x7f\x80\xff", 0)
         assert str(e.value) == ("identifier expected\n"
-                                "  ??~???\n"
+                                "  ??~?????\n"
                                 "  ^")
         e = raises(ffi.error, ffi.cast, "X" * 600, 0)
         assert str(e.value) == ("undefined type name")
@@ -255,7 +255,7 @@ class AppTestFFIObj:
         import _cffi_backend as _cffi1_backend
         ffi = _cffi1_backend.FFI()
         a = ffi.new("signed char[]", [5, 6, 7])
-        assert ffi.buffer(a)[:] == '\x05\x06\x07'
+        assert ffi.buffer(a)[:] == b'\x05\x06\x07'
         assert ffi.buffer(cdata=a, size=2)[:] == b'\x05\x06'
         assert type(ffi.buffer(a)) is ffi.buffer
 
@@ -309,6 +309,15 @@ class AppTestFFIObj:
                                          "char[]", b"abcd", True)
         raises((TypeError, BufferError), ffi.from_buffer, b"abcd",
                                          require_writable=True)
+
+    def test_from_buffer_BytesIO(self):
+        from _cffi_backend import FFI
+        import _io
+        ffi = FFI()
+        a = _io.BytesIO(b"Hello, world!")
+        buf = a.getbuffer()
+        # used to segfault
+        raises(TypeError, ffi.from_buffer, buf)
 
     def test_memmove(self):
         import sys
@@ -439,7 +448,7 @@ class AppTestFFIObj:
         seen = []
         def myalloc(size):
             seen.append(size)
-            return ffi.new("char[]", "X" * size)
+            return ffi.new("char[]", b"X" * size)
         def myfree(raw):
             seen.append(raw)
         alloc1 = ffi.new_allocator(myalloc, myfree)
@@ -473,7 +482,7 @@ class AppTestFFIObj:
         seen = []
         def myalloc(size):
             seen.append(size)
-            return ffi.new("char[]", "X" * size)
+            return ffi.new("char[]", b"X" * size)
         alloc1 = ffi.new_allocator(myalloc)    # no 'free'
         p1 = alloc1("int[10]")
         assert seen == [40]

@@ -1,3 +1,7 @@
+import sys
+import gc
+from _io import StringIO
+
 def test_emptyclass():
     class empty(object): pass
     inst = empty()
@@ -133,7 +137,6 @@ def test_dict():
     assert not hasattr(a, 'x')
 
 def test_del():
-    import gc
     lst = []
     class A(object):
         def __del__(self):
@@ -143,32 +146,38 @@ def test_del():
     assert lst == [42]
 
 def test_del_exception():
-    import sys, StringIO, gc
     class A(object):
         def __del__(self):
-            yaddadlaouti
+            raise ValueError('foo bar')
     prev = sys.stderr
     try:
-        sys.stderr = StringIO.StringIO()
+        sys.stderr = StringIO()
         A()
         gc.collect()
         res = sys.stderr.getvalue()
+        sys.stderr = StringIO()
         A()
         gc.collect()
         res2 = sys.stderr.getvalue()
+        A.__del__ = lambda a, b, c: None  # will get "not enough arguments"
+        sys.stderr = StringIO()
+        A()
+        gc.collect()
+        res3 = sys.stderr.getvalue()
     finally:
         sys.stderr = prev
-    assert res.startswith('Exception')
-    assert 'NameError' in res
-    assert 'yaddadlaouti' in res
-    assert 'ignored' in res
-    assert res.count('\n') == 1    # a single line
-    assert res2.count('\n') == 2   # two lines
-    line2 = res2.split('\n')[1]
-    assert line2.startswith('Exception')
-    assert 'NameError' in line2
-    assert 'yaddadlaouti' in line2
-    assert 'ignored' in line2
+    def check_tb(x, traceback=True):
+        # print('----\n%s----\n' % (x,))
+        assert x.startswith('Exception ignored in: <function ')
+        if traceback:
+            assert '>\nTraceback (most recent call last):\n  File "' in x
+            assert " in __del__\n" in x
+            assert x.endswith("\nValueError: foo bar\n")
+        else:
+            assert 'TypeError: <lambda>() missing 2 required pos' in x
+    check_tb(res)
+    check_tb(res2)
+    check_tb(res3, traceback=False)
 
 def test_instance_overrides_meth():
     class C(object):
@@ -195,8 +204,14 @@ def test_repr():
     class Foo(object):
         pass
     Foo.__module__ = 'a.b.c'
+    Foo.__qualname__ = 'd.Foo'
     s = repr(Foo())
-    assert s.startswith('<a.b.c.Foo object at ')
+    assert s.startswith('<a.b.c.d.Foo object at ')
+
+def test_repr_nonascii():
+    Japan = type('日本', (), dict(__module__='日本国'))
+    s = repr(Japan())
+    assert s.startswith('<日本国.日本 object at ')
 
 def test_del_attr():
     class Foo(object):

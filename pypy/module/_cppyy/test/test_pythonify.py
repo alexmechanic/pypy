@@ -36,8 +36,6 @@ class AppTestPYTHONIFY:
         res = example01_class.staticAddOneToInt(1)
         assert res == 2
 
-        res = example01_class.staticAddOneToInt(1L)
-        assert res == 2
         res = example01_class.staticAddOneToInt(1, 2)
         assert res == 4
         res = example01_class.staticAddOneToInt(-1)
@@ -108,7 +106,7 @@ class AppTestPYTHONIFY:
         res = instance.addToStringValue("-12")   # TODO: this leaks
         assert res == "30"
 
-        res = instance.staticAddOneToInt(1L)
+        res = instance.staticAddOneToInt(1)
         assert res == 2
 
         instance.__destruct__()

@@ -86,6 +86,13 @@ and the callback will not be invoked.  (Issue `#2030`__)
 .. __: https://docs.python.org/2/library/weakref.html
 .. __: https://foss.heptapod.net/pypy/pypy/issue/2030/
 
+A new difference: before CPython 3.4, a weakref to ``x`` was always
+cleared before the ``x.__del__()`` method was called.  Since CPython 3.4
+the picture is more muddy.  Often, the weakref is still alive while
+``x.__del__()`` runs, but not always (e.g. not in case of reference
+cycles).  In PyPy3 we have kept the more consistent pre-3.4 behavior; we
+can't do something really different if there are cycles or not.
+
 ---------------------------------
 
 There are a few extra implications from the difference in the GC.  Most
@@ -162,8 +169,6 @@ Two examples::
 
     class D(dict):
         def __getitem__(self, key):
-            if key == 'print':
-                return print
             return "%r from D" % (key,)
 
     class A(object):
@@ -172,17 +177,15 @@ Two examples::
     a = A()
     a.__dict__ = D()
     a.foo = "a's own foo"
-    print(a.foo)
+    print a.foo
     # CPython => a's own foo
     # PyPy => 'foo' from D
 
-    print('==========')
-
     glob = D(foo="base item")
     loc = {}
-    exec("print(foo)", glob, loc)
-    # CPython => base item, and never looks up "print" in D
-    # PyPy => 'foo' from D, and looks up "print" in D
+    exec "print foo" in glob, loc
+    # CPython => base item
+    # PyPy => 'foo' from D
 
 
 Mutating classes of objects which are already used as dictionary keys
@@ -451,6 +454,12 @@ Miscellaneous
   from the Makefile used to build the interpreter. PyPy should bake the values
   in during compilation, but does not do that yet.
 
+* CPython's ``sys.settrace()`` sometimes reports an ``exception`` at the
+  end of ``for`` or ``yield from`` lines for the ``StopIteration``, and
+  sometimes not.  The problem is that it occurs in an ill-defined subset
+  of cases.  PyPy attempts to emulate that but the precise set of cases
+  is not exactly the same.
+
 * ``"%d" % x`` and ``"%x" % x`` and similar constructs, where ``x`` is
   an instance of a subclass of ``long`` that overrides the special
   methods ``__str__`` or ``__hex__`` or ``__oct__``: PyPy doesn't call
@@ -570,7 +579,6 @@ List of extension modules that we support:
     time
     token
     unicodedata
-    zipimport
     zlib
 
   When translated on Windows, a few Unix-only modules are skipped,

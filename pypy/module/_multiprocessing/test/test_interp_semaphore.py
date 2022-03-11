@@ -1,14 +1,16 @@
 import pytest
 import time
+import sys
 from rpython.rlib.rgil import yield_thread
 from pypy.tool.pytest.objspace import gettestobjspace
 from pypy.interpreter.gateway import interp2app
-from pypy.module.thread.os_lock import allocate_lock
+from pypy.module.thread.os_lock import _set_sentinel
 from pypy.module.thread.os_thread import start_new_thread
 from pypy.module._multiprocessing.interp_semaphore import (
-    create_semaphore, delete_semaphore, W_SemLock)
+    create_semaphore, delete_semaphore, W_SemLock, sem_unlink)
 
 
+@pytest.mark.skipif(sys.platform == 'win32', reason='hangs on win32')
 @pytest.mark.parametrize('spaceconfig', [
     {'usemodules': ['_multiprocessing', 'thread']}])
 def test_semlock_release(space):
@@ -17,13 +19,14 @@ def test_semlock_release(space):
     sem_name = '/test8'
     _handle = create_semaphore(space, sem_name, 1, 1)
     try:
-        w_lock = W_SemLock(space, _handle, 0, 1)
+        sem_unlink(sem_name)
+        w_lock = W_SemLock(space, _handle, 0, 1, None)
         created = []
         successful = []
         N_THREADS = 16
 
         def run(space):
-            w_sentinel = allocate_lock(space)
+            w_sentinel = _set_sentinel(space)
             yield_thread()
             w_sentinel.descr_lock_acquire(space)  # releases GIL
             try:
@@ -34,11 +37,9 @@ def test_semlock_release(space):
                     yield_thread()
                     w_lock.release(space)
                     successful.append(w_sentinel)
-                w_sentinel.descr_lock_release(space)
             except:
                 import traceback
                 traceback.print_exc()
-                w_sentinel.descr_lock_release(space)
                 raise
         w_run = space.wrap(interp2app(run))
 

@@ -5,6 +5,7 @@ from rpython.rlib.rarithmetic import intmask, r_uint, LONG_BIT
 from rpython.rlib.longlong2float import longlong2float, float2longlong
 
 from pypy.interpreter.baseobjspace import W_Root
+from pypy.interpreter.unicodehelper import str_decode_utf8
 from pypy.objspace.std.dictmultiobject import (
     W_DictMultiObject, DictStrategy, ObjectDictStrategy, BaseKeyIterator,
     BaseValueIterator, BaseItemIterator, _never_equal_to_string,
@@ -71,6 +72,7 @@ class AbstractAttribute(object):
     @jit.elidable
     def find_map_attr(self, name, attrkind):
         # attr cache
+        assert isinstance(name, str)    # utf8-encoded
         space = self.space
         cache = space.fromcache(MapAttrCache)
         SHIFT2 = r_uint.BITS - space.config.objspace.std.methodcachesizeexp
@@ -445,7 +447,8 @@ class PlainAttribute(AbstractAttribute):
     def materialize_str_dict(self, space, obj, str_dict):
         new_obj = self.back.materialize_str_dict(space, obj, str_dict)
         if self.attrkind == DICT:
-            str_dict[self.name] = self._prim_direct_read(obj)
+            w_key = space.newtext(self.name)
+            str_dict[w_key] = self._prim_direct_read(obj)
         else:
             self._copy_attr(obj, new_obj)
         return new_obj
@@ -680,10 +683,8 @@ class BaseUserClassMapdict:
         self._set_mapdict_storage_and_map(new_obj.storage, new_obj.map)
 
     def user_setup(self, space, w_subtype):
-        from pypy.module.__builtin__.interp_classobj import W_InstanceObject
         assert (not self.typedef.hasdict or
-                isinstance(w_subtype.terminator, NoDictTerminator) or
-                self.typedef is W_InstanceObject.typedef)
+                isinstance(w_subtype.terminator, NoDictTerminator))
         self._mapdict_init_empty(w_subtype.terminator)
 
 
@@ -978,7 +979,7 @@ class MapDictStrategy(DictStrategy):
 
     def switch_to_text_strategy(self, w_dict):
         w_obj = self.unerase(w_dict.dstorage)
-        strategy = self.space.fromcache(BytesDictStrategy)
+        strategy = self.space.fromcache(UnicodeDictStrategy)
         str_dict = strategy.unerase(strategy.get_empty_storage())
         w_dict.set_strategy(strategy)
         w_dict.dstorage = strategy.erase(str_dict)
@@ -1074,6 +1075,11 @@ class MapDictStrategy(DictStrategy):
     def iteritems(self, w_dict):
         return MapDictIteratorItems(self.space, self, w_dict)
 
+    def iterreversed(self, w_dict):
+        return MapDictKeyIteratorReversed(self.space, self, w_dict)
+
+
+
 def make_instance_dict(space):
     w_fake_object = Object()
     terminator = space.fromcache(get_terminator_for_dicts)
@@ -1163,6 +1169,30 @@ class MapDictIteratorItems(BaseItemIterator):
             return w_attr, self.w_obj.getdictvalue(self.space, attr)
         return None, None
 
+class MapDictKeyIteratorReversed(BaseKeyIterator):
+    def __init__(self, space, strategy, w_dict):
+        BaseKeyIterator.__init__(self, space, strategy, w_dict)
+        w_obj = strategy.unerase(w_dict.dstorage)
+        self.w_obj = w_obj
+        curr_map = w_obj._get_mapdict_map()
+        attrs = []
+        while True:
+            curr_map = curr_map.search(DICT)
+            if curr_map is None:
+                break
+            attrs.append(curr_map.name)
+            curr_map = curr_map.back
+        attrs.reverse()
+        self.attrs = attrs
+
+    def next_key_entry(self):
+        assert isinstance(self.w_dict.get_strategy(), MapDictStrategy)
+        attrs = self.attrs
+        if len(attrs) > 0:
+            attr = attrs.pop()
+            w_attr = self.space.newtext(attr)
+            return w_attr
+        return None
 
 # ____________________________________________________________
 # Magic caching
@@ -1263,7 +1293,7 @@ def LOAD_ATTR_slowpath(pycode, w_obj, nameindex, map):
                 # also a dict attribute, use the latter, caching its storageindex.
                 # If not, we loose.  We could do better in this case too,
                 # but we don't care too much; the common case of a method
-                # invocation is handled by LOOKUP_METHOD_xxx below.
+                # invocation is handled by LOAD_METHOD_xxx below.
                 attrname = name
                 attrkind = DICT
             #
@@ -1280,7 +1310,7 @@ def LOAD_ATTR_slowpath(pycode, w_obj, nameindex, map):
     return space.getattr(w_obj, w_name)
 LOAD_ATTR_slowpath._dont_inline_ = True
 
-def LOOKUP_METHOD_mapdict(f, nameindex, w_obj):
+def LOAD_METHOD_mapdict(f, nameindex, w_obj):
     pycode = f.getcode()
     entry = pycode._mapdict_caches[nameindex]
     if entry.is_valid_for_obj(w_obj):
@@ -1291,7 +1321,7 @@ def LOOKUP_METHOD_mapdict(f, nameindex, w_obj):
             return True
     return False
 
-def LOOKUP_METHOD_mapdict_fill_cache_method(space, pycode, name, nameindex,
+def LOAD_METHOD_mapdict_fill_cache_method(space, pycode, name, nameindex,
                                             w_obj, w_type, w_method):
     # if the layout has a dict itself, then mapdict is not used for normal
     # attributes. Then the cache won't be able to spot changes to the dict.
@@ -1310,5 +1340,5 @@ def LOOKUP_METHOD_mapdict_fill_cache_method(space, pycode, name, nameindex,
     _fill_cache(pycode, nameindex, map, version_tag, None, w_method)
 
 # XXX fix me: if a function contains a loop with both LOAD_ATTR and
-# XXX LOOKUP_METHOD on the same attribute name, it keeps trashing and
+# XXX LOAD_METHOD on the same attribute name, it keeps trashing and
 # XXX rebuilding the cache

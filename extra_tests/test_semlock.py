@@ -1,6 +1,6 @@
 from _multiprocessing import SemLock
 from threading import Thread
-import thread
+import _thread
 import time
 import sys
 import pytest
@@ -8,10 +8,10 @@ import pytest
 @pytest.mark.skipif(sys.platform=='win32', reason='segfaults on win32')
 def test_notify_all():
     """A low-level variation on test_notify_all() in lib-python's
-    test_multiprocessing.py
+    _test_multiprocessing.py
     """
     N_THREADS = 1000
-    lock = SemLock(0, 1, 1)
+    lock = SemLock(0, 1, 1, "/test_notify_all", True)
     results = []
 
     def f(n):
@@ -27,7 +27,7 @@ def test_notify_all():
         for t in threads:
             try:
                 t.start()
-            except thread.error:
+            except _thread.error:
                 # too many threads for this system
                 t.started = False
                 n_started -= 1

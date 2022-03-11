@@ -8,7 +8,7 @@ syslog facility.
 
 import sys
 if sys.platform == 'win32':
-    raise ImportError("No syslog on Windows")
+    raise ModuleNotFoundError("No syslog on Windows", name="syslog")
 
 try: from __pypy__ import builtinify
 except ImportError: builtinify = lambda f: f
@@ -23,6 +23,9 @@ def _get_argv():
         import sys
         script = sys.argv[0]
         if isinstance(script, str):
+            # note: CPython <= 3.8 misses the "+1" here, so writes logs
+            # with a leading "/".  It is fixed in 3.9.
+            # https://github.com/python/cpython/pull/16557
             return script[script.rfind('/')+1:] or None
     except Exception:
         pass
@@ -35,10 +38,12 @@ def openlog(ident=None, logoption=0, facility=lib.LOG_USER):
         ident = _get_argv()
     if ident is None:
         _S_ident_o = ffi.NULL
-    elif isinstance(ident, str):
-        _S_ident_o = ffi.new("char[]", ident)    # keepalive
     else:
-        raise TypeError("'ident' must be a string or None")
+        if not isinstance(ident, str):
+            msg = "openlog() argument 1 must be a str, not {!r}"
+            raise TypeError(msg.format(type(ident).__name__))
+        ident = ident.encode(sys.getdefaultencoding())
+        _S_ident_o = ffi.new("char[]", ident)  # keepalive
     lib.openlog(_S_ident_o, logoption, facility)
     _S_log_open = True
 
@@ -51,9 +56,11 @@ def syslog(arg1, arg2=None):
     # if log is not opened, open it now
     if not _S_log_open:
         openlog()
-    if isinstance(message, unicode):
-        message = str(message)
-    lib.syslog(priority, "%s", message)
+    if not isinstance(message, str):
+        raise TypeError("syslog() message must be a str, not {!r}".format(
+                type(message).__name__))
+    message = message.encode(sys.getdefaultencoding())
+    lib.syslog(priority, b"%s", message)
 
 @builtinify
 def closelog():

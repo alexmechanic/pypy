@@ -33,9 +33,12 @@ import sys, os
 class Command(object):
     finish = 0
     kills_digit_arg = 1
-    def __init__(self, reader, cmd):
+
+    def __init__(self, reader, event_name, event):
         self.reader = reader
-        self.event_name, self.event = cmd
+        self.event = event
+        self.event_name = event_name
+
     def do(self):
         pass
 
@@ -366,8 +369,12 @@ class invalid_command(Command):
 
 class qIHelp(Command):
     def do(self):
+        from .reader import disp_str
+
         r = self.reader
-        r.insert((self.event + r.console.getpending().data) * r.get_arg())
+        pending = r.console.getpending().data
+        disp = disp_str((self.event + pending).encode())[0]
+        r.insert(disp * r.get_arg())
         r.pop_input_trans()
 
 from pyrepl import input
@@ -381,4 +388,7 @@ class QITrans(object):
 class quoted_insert(Command):
     kills_digit_arg = 0
     def do(self):
-        self.reader.push_input_trans(QITrans())
+        # XXX in Python 3, processing insert/C-q/C-v keys crashes
+        # because of a mixture of str and bytes.  Disable these keys.
+        pass
+        #self.reader.push_input_trans(QITrans())

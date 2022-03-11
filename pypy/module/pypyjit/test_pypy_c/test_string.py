@@ -1,59 +1,97 @@
 # -*- coding: utf-8 -*-
 import sys
+import pytest
 from pypy.module.pypyjit.test_pypy_c.test_00_model import BaseTestPyPyC
 
 # XXX review the <Call> descrs to replace some EF=5 with EF=4 (elidable)
 
 
 class TestString(BaseTestPyPyC):
+
+    def test_python3_missing_bchr(self):
+        # Check that 'bytes([i])' is special-cased into something
+        # efficient, as Python 3.5 doesn't have a bchr() function or
+        # anything more direct.
+        def main(n):
+            i = 0
+            result = b''
+            while i < n:
+                c = bytes([i])
+                result += c
+                i += 1
+            return i
+        log = self.run(main, [255])
+        assert log.result == 255
+        loop, = log.loops_by_filename(self.filepath)
+        assert loop.match("""
+            # nothing left like allocating a list object or doing any
+            # residual call
+            i49 = int_lt(i38, i26)
+            guard_true(i49, descr=...)
+            guard_not_invalidated(descr=...)
+            i51 = int_lt(i38, 256)
+            guard_true(i51, descr=...)
+            i53 = int_add(i38, 1)
+            --TICK--
+            i58 = strlen(p46)
+            i60 = int_add(i58, 1)
+            p61 = newstr(i60)
+            copystrcontent(p46, p61, 0, 0, i58)
+            strsetitem(p61, i58, i38)
+            p62 = newstr(1)
+            strsetitem(p62, 0, i38)
+            jump(..., descr=...)
+        """)
+
     def test_lookup_default_encoding(self):
         def main(n):
-            import string
             i = 0
-            letters = string.letters
-            uletters = unicode(string.letters)
+            letters = b'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
+            uletters = u'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
             while i < n:
-                i += letters[i % len(letters)] == uletters[i % len(letters)]
+                c = bytes([letters[i % len(uletters)]])
+                i += (c.decode() == uletters[i % len(uletters)])
             return i
 
         log = self.run(main, [300], import_site=True)
         assert log.result == 300
         loop, = log.loops_by_filename(self.filepath)
         assert loop.match("""
-            i14 = int_lt(i6, i9)
-            guard_true(i14, descr=...)
+            i88 = int_lt(i83, i36)
+            guard_true(i88, descr=...)
             guard_not_invalidated(descr=...)
-            i16 = int_eq(i6, %d)
-            i83 = call_i(ConstClass(ll_int_py_mod__Signed_Signed), i6, i10, descr=<Calli . ii EF=0 OS=14>)
-            i21 = int_lt(i83, 0)
-            guard_false(i21, descr=...)
-            i22 = int_ge(i83, i10)
-            guard_false(i22, descr=...)
-            i89 = strgetitem(p55, i83)
-            i24 = int_ge(i83, i12)
-            guard_false(i24, descr=...)
-            i93 = int_add(i83, 1)
-            i94 = int_gt(i93, i56)
-            guard_false(i94, descr=...)
-            p96 = newstr(1)
-            strsetitem(p96, 0, i89)
-            i98 = call_i(ConstClass(first_non_ascii_char), p96, descr=<Calli . r EF=4>)
+            i92 = int_eq(i83, %d)
+            i94 = call_i(ConstClass(ll_int_py_mod__Signed_Signed), i83, i46, descr=<Calli . ii EF=0 OS=14>)
+            i96 = int_lt(i94, 0)
+            guard_false(i96, descr=...)
+            i97 = int_ge(i94, i53)
+            guard_false(i97, descr=...)
+            i98 = strgetitem(p52, i94)
+            p103 = newstr(1)
+            strsetitem(p103, 0, i98)
+            i95 = call_i(ConstClass(_check_utf8), p103, 0, 0, -1, descr=<Calli 8 riii EF=4>)
             guard_no_exception(descr=...)
-            i100 = int_lt(i98, 0)
-            guard_true(i100, descr=...)
-            i102 = call_i(ConstClass(_ll_4_str_eq_slice_char__rpy_stringPtr_Signed_Signed_Char), p13, i83, 1, i89, descr=<Calli . riii EF=0 OS=27>)
-            guard_true(i102, descr=...)
-            i104 = int_add(i6, 1)
+            i98 = int_ge(i95, 0)
+            guard_true(i98, descr=...)
+            i99 = int_ge(i94, i46)
+            guard_false(i99, descr=...)
+            i115 = int_add(i94, 1)
+            i116 = int_gt(i115, i71)
+            guard_false(i116, descr=...)
+
+            i104 = call_i(ConstClass(_ll_4_str_eq_slice_char__rpy_stringPtr_Signed_Signed_Char), p65, i94, 1, i98, descr=<Calli 8 riii EF=0 OS=27>)
+            guard_true(i104, descr=...)
+            i124 = int_add(i83, 1)
             --TICK--
             jump(..., descr=...)
         """ % (-sys.maxint-1,))
 
-    def test_long(self):
+    def test_int_base_16(self):
         def main(n):
-            import string
             i = 1
             while i < n:
-                i += int(long(string.digits[i % len(string.digits)], 16))
+                digits = '0123456789'
+                i += int(digits[i % len(digits)], 16)
             return i
 
         log = self.run(main, [1100], import_site=True)
@@ -78,17 +116,13 @@ class TestString(BaseTestPyPyC):
             i87 = int_mul(i85, 10)
             i19 = int_sub(i6, i87)
 
-            i23 = strgetitem(p10, i19)
+            i85 = int_add(i19, 1)   # not used
             p25 = newstr(1)
+            i23 = strgetitem(ConstPtr(ptr92), i19)
             strsetitem(p25, 0, i23)
-            p93 = call_r(ConstClass(fromstr), p25, 16, 0, descr=<Callr . rii EF=4>)
+            i107 = call_i(ConstClass(string_to_int), p25, 16, 1, 1, descr=<Calli . riii EF=4>)
             guard_no_exception(descr=...)
-            i95 = getfield_gc_i(p93, descr=<FieldS rpython.rlib.rbigint.rbigint.inst_size .*>)
-            i96 = int_gt(i95, #)
-            guard_false(i96, descr=...)
-            i94 = call_i(ConstClass(rbigint._toint_helper), p93, descr=<Calli . r EF=4>)
-            guard_no_exception(descr=...)
-            i95 = int_add_ovf(i6, i94)
+            i95 = int_add_ovf(i6, i107)
             guard_no_overflow(descr=...)
             --TICK--
             jump(..., descr=...)
@@ -136,7 +170,10 @@ class TestString(BaseTestPyPyC):
             guard_no_exception(descr=...)
             p95 = call_r(..., descr=<Callr . r EF=5>)     # ll_build
             guard_no_exception(descr=...)
-            i96 = strlen(p95)
+            i96 = call_i(ConstClass(codepoints_in_utf8), p95, 0, _, descr=<Calli . rii EF=4>)
+            guard_no_exception(descr=...)
+            i969 = int_lt(i96, 0)
+            guard_false(i969, descr=...)
             i97 = int_add_ovf(i71, i96)
             guard_no_overflow(descr=...)
             i98 = int_sub(i74, 1)
@@ -153,7 +190,7 @@ class TestString(BaseTestPyPyC):
                 u = s.lower()   # ID: calltwo
                 lst.append(t)
                 lst.append(u)
-            return len(','.join(lst))
+            return len(b','.join(lst))
         log = self.run(main, [1000])
         assert log.result == main(1000)
         loops = log.loops_by_filename(self.filepath)
@@ -173,7 +210,7 @@ class TestString(BaseTestPyPyC):
                 u = s.lower()   # ID: calltwo
                 lst.append(t)
                 lst.append(u)
-            return len(','.join(lst))
+            return len(u','.join(lst))
         log = self.run(main, [1000])
         assert log.result == main(1000)
         loops = log.loops_by_filename(self.filepath)
@@ -188,7 +225,13 @@ class TestString(BaseTestPyPyC):
             ''')
         assert loop.match_by_id('calltwo', '')    # nothing
 
+    @pytest.mark.xfail
     def test_move_method_call_out_of_loop(self):
+        # XXX this does not work: _lower_unicode() is found to be elidable,
+        # but it can raise (because of 'raise StopIteration' in
+        # Utf8StringIterator.next()---we don't detect that such an exception
+        # is always caught in the caller).  Raising elidable calls are not
+        # unroll-removed: see issue #2015.
         def main(n):
             lst = []
             s = 'Hello %d' % n
@@ -207,7 +250,7 @@ class TestString(BaseTestPyPyC):
         import codecs
 
         def main(n):
-            for i in xrange(n):
+            for i in range(n):
                 codecs.lookup('utf8')
             return i
         """, [1000])
@@ -216,7 +259,7 @@ class TestString(BaseTestPyPyC):
         i45 = int_lt(i43, i26)
         guard_true(i45, descr=...)
         i46 = int_add(i43, 1)
-        setfield_gc(p15, i46, descr=<FieldS pypy.module.__builtin__.functional.W_XRangeIterator.inst_current 8>)
+        setfield_gc(p15, i46, descr=<FieldS pypy.module.__builtin__.functional.W_IntRangeIterator.inst_current 8>)
         guard_not_invalidated(descr=...)
         --TICK--
         jump(..., descr=...)
@@ -225,8 +268,8 @@ class TestString(BaseTestPyPyC):
     def test_decode_ascii(self):
         log = self.run("""
         def main(n):
-            for i in xrange(n):
-                unicode(str(i))
+            for i in range(n):
+                (b"x" * (i & 15)).decode('ascii')
             return i
         """, [1000])
         loop, = log.loops_by_filename(self.filepath)
@@ -234,29 +277,32 @@ class TestString(BaseTestPyPyC):
         i49 = int_lt(i47, i24)
         guard_true(i49, descr=...)
         i50 = int_add(i47, 1)
-        setfield_gc(p15, i50, descr=<FieldS pypy.module.__builtin__.functional.W_XRangeIterator.inst_current 8>)
+        i53 = int_and(i47, 15)
+        setfield_gc(p15, i50, descr=<FieldS pypy.module.__builtin__.functional.W_IntRangeIterator.inst_current 8>)
+        i55 = int_le(i53, 0)
+        guard_false(i55, descr=...)
+        p80 = call_r(ConstClass(ll_char_mul__Char_Signed), 120, i53, descr=<Callr . ii EF=3>)
+        guard_no_exception(descr=...)
         guard_not_invalidated(descr=...)
-        p80 = call_r(ConstClass(ll_str__IntegerR_SignedConst_Signed), i47, descr=<Callr . i EF=3>)
+        i59 = call_i(ConstClass(first_non_ascii_char), p80, descr=<Calli . r EF=4>)
         guard_no_exception(descr=...)
-        i51 = call_i(ConstClass(first_non_ascii_char), p80, descr=<Calli . r EF=4>)
-        guard_no_exception(descr=...)
-        i52 = int_lt(i51, 0)
-        guard_true(i52, descr=...)
-        i53 = strlen(p80)
+        i61 = int_lt(i59, 0)
+        guard_true(i61, descr=...)
+        i62 = strlen(p80)
         --TICK--
         jump(..., descr=...)
         """)
 
     def test_unicode_indexing_makes_no_bridges(self):
-        log = self.run("""
-        b = b"b'aaaaa\xc3\xa4\xf0\x9f\x91\xa9\xe2\x80\x8d\xf0\x9f\x91\xa9\xe2\x80\x8d\xf0\x9f\x91\xa7\xe2\x80\x8d\xf0\x9f\x91\xa6'"
-        u = b.decode("utf-8") * 1000
+        log = self.run(r"""
+        u = 'abä👨‍👩‍👧‍👦 ' * 1000
         def main():
             for j in range(10):
                 for i in range(len(u)):
                     u[i] # ID: index0
         """, [])
-        ops = log.loops[0].ops_by_id("index0")
+        loop, = log.loops_by_id("index0")
+        ops = loop.ops_by_id("index0")
         for op in ops:
             assert op.bridge is None
 
@@ -297,8 +343,7 @@ class TestString(BaseTestPyPyC):
     def test_unicode_slicing_small_constant_indices(self):
         log = self.run("""
         def main(n):
-            b = b'ab\xc3\xa4\xf0\x9f\x91\xa9\xe2\x80\x8d\xf0\x9f\x91\xa9\xe2\x80\x8d\xf0\x9f\x91\xa7\xe2\x80\x8d\xf0\x9f\x91\xa6'
-            u = b.decode("utf-8") * 1000
+            u = 'abä👨‍👩‍👧‍👦 ' * 1000
             global s
             count = 0
             while u:
@@ -308,12 +353,12 @@ class TestString(BaseTestPyPyC):
         """, [1000])
         loop, = log.loops_by_filename(self.filepath)
         assert loop.match_by_id('index', '''
-            i51 = int_eq(1, i38)
+            i51 = int_ge(1, i38)
             guard_false(i51, descr=...)
+            i59 = int_sub(i38, 1)
             i52 = strlen(p47)
             i53 = int_eq(i38, i52)
             guard_false(i53, descr=...)
             i56 = call_i(ConstClass(next_codepoint_pos_dont_look_inside), p47, 0, descr=...)
             i57 = int_sub(i52, i56)
-            i59 = int_sub(i38, 1)
         ''')

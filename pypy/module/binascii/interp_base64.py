@@ -2,6 +2,7 @@ from pypy.interpreter.error import OperationError
 from pypy.interpreter.gateway import unwrap_spec
 from rpython.rlib.rstring import StringBuilder
 from pypy.module.binascii.interp_binascii import raise_Error
+from pypy.module.binascii.interp_binascii import AsciiBufferUnwrapper
 from rpython.rlib.rarithmetic import ovfcheck
 
 # ____________________________________________________________
@@ -24,7 +25,7 @@ table_a2b_base64 = [
     -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1,
     -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1,
     -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1,
-    -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1,    
+    -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1,
 ]
 def _transform(n):
     if n == -1:
@@ -34,8 +35,7 @@ def _transform(n):
 table_a2b_base64 = ''.join(map(_transform, table_a2b_base64))
 assert len(table_a2b_base64) == 256
 
-
-@unwrap_spec(ascii='bufferstr')
+@unwrap_spec(ascii=AsciiBufferUnwrapper)
 def a2b_base64(space, ascii):
     "Decode a line of base64 data."
 
@@ -44,6 +44,7 @@ def a2b_base64(space, ascii):
     leftchar = 0
     leftbits = 0
     last_char_was_a_pad = False
+    bin_used = 0
 
     for c in ascii:
         if c == PAD:
@@ -65,10 +66,19 @@ def a2b_base64(space, ascii):
                 leftbits -= 8
                 res.append(chr(leftchar >> leftbits))
                 leftchar &= ((1 << leftbits) - 1)
+                bin_used += 1
             #
             last_char_was_a_pad = False
     else:
         if leftbits != 0:
+            if leftbits == 6:
+                # There is exactly one extra valid, non-padding, base64 character.
+                # This is an invalid length, as there is no possible input that
+                # could encoded into such a base64 string.
+                msg = ("Invalid base64-encoded string: number of data "
+                       "characters (%d) cannot be 1 more than a multiple of 4" %
+                       ((bin_used // 3) * 4 + 1))
+                raise_Error(space, msg)
             raise_Error(space, "Incorrect padding")
 
     return space.newbytes(res.build())
@@ -78,8 +88,8 @@ def a2b_base64(space, ascii):
 table_b2a_base64 = (
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
 
-@unwrap_spec(bin='bufferstr')
-def b2a_base64(space, bin):
+@unwrap_spec(bin='bufferstr', newline=bool)
+def b2a_base64(space, bin, __kwonly__, newline=True):
     "Base64-code line of data."
 
     newlength = (len(bin) + 2) // 3
@@ -109,5 +119,6 @@ def b2a_base64(space, bin):
     elif leftbits == 4:
         res.append(table_b2a_base64[(leftchar & 0xf) << 2])
         res.append(PAD)
-    res.append('\n')
+    if newline:
+        res.append('\n')
     return space.newbytes(res.build())

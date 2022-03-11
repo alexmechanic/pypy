@@ -2,11 +2,13 @@
 
 python_tokens = {}
 python_opmap = {}
+token_names = {}
 
 def _add_tok(name, *values):
     index = len(python_tokens)
     assert index < 256
     python_tokens[name] = index
+    token_names[index] = name
     for value in values:
         python_opmap[value] = index
 
@@ -61,12 +63,21 @@ _add_tok('DOUBLESTAREQUAL', "**=" )
 _add_tok('DOUBLESLASH', "//" )
 _add_tok('DOUBLESLASHEQUAL',"//=" )
 _add_tok('AT', "@" )
+_add_tok('ATEQUAL', "@=" )
+_add_tok('RARROW', "->")
+_add_tok('ELLIPSIS', "...")
+_add_tok('COLONEQUAL', ':=')
 _add_tok('OP')
+_add_tok('TYPE_IGNORE')
+_add_tok('TYPE_COMMENT')
+_add_tok('ASYNC') # unused, just keywords now
+_add_tok('AWAIT') # unused, just keywords now
 _add_tok('ERRORTOKEN')
 
 # extra PyPy-specific tokens
 _add_tok("COMMENT")
 _add_tok("NL")
+_add_tok("ENCODING")
 _add_tok("REVDBMETAVAR", "$NUM")
 
 del _add_tok

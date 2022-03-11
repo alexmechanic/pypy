@@ -1,6 +1,8 @@
 from pypy.objspace.std.specialisedtupleobject import _specialisations
 from pypy.objspace.std.test import test_tupleobject
 from pypy.objspace.std.tupleobject import W_TupleObject
+from pypy.objspace.std.longobject import W_LongObject
+from rpython.rlib.rbigint import rbigint
 from pypy.tool.pytest.objspace import gettestobjspace
 
 
@@ -21,6 +23,11 @@ class TestW_SpecialisedTupleObject():
 
     def test_specialisedtupleclassname(self):
         w_tuple = self.space.newtuple([self.space.wrap(1), self.space.wrap(2)])
+        assert w_tuple.__class__.__name__ == 'W_SpecialisedTupleObject_ii'
+
+    def test_integer_strategy_with_w_long(self):
+        w = W_LongObject(rbigint.fromlong(42))
+        w_tuple = self.space.newtuple([w, w])
         assert w_tuple.__class__.__name__ == 'W_SpecialisedTupleObject_ii'
 
     def hash_test(self, values, must_be_specialized):
@@ -72,7 +79,7 @@ class AppTestW_SpecialisedTupleObject:
     def w_isspecialised(self, obj, expected=''):
         import __pypy__
         r = __pypy__.internal_repr(obj)
-        print obj, '==>', r, '   (expected: %r)' % expected
+        print(obj, '==>', r, '   (expected: %r)' % expected)
         return ("SpecialisedTupleObject" + expected) in r
 
     def test_createspecialisedtuple(self):
@@ -136,7 +143,7 @@ class AppTestW_SpecialisedTupleObject:
         b = (1, 3, 2)
         assert not a == b
 
-        values = [2, 2L, 2.0, 1, 1L, 1.0]
+        values = [2, 2.0, 1, 1.0]
         for x in values:
             for y in values:
                 assert ((1, 2) == (x, y)) == (1 == x and 2 == y)
@@ -193,7 +200,12 @@ class AppTestW_SpecialisedTupleObject:
         c = (2, 4)
         assert hash(a) != hash(c)
 
-        assert hash(a) == hash((1L, 2L)) == hash((1.0, 2.0)) == hash((1.0, 2L))
+        assert hash(a) == hash((1, 2)) == hash((1.0, 2.0)) == hash((1.0, 2))
+
+        d = tuple([-1, 1])
+        e = (-1, 1)
+        assert d == e
+        assert hash(d) == hash(e)
 
         x = (-1, -1)
         y = tuple([-1, -1])
@@ -244,12 +256,24 @@ class AppTestW_SpecialisedTupleObject:
         t = (F(42), F(43))
         assert type(t[0]) is F
 
+    def test_ovfl_bug(self):
+        # previously failed
+        a = (0xffffffffffffffff, 0)
+
     def test_bug_tuples_of_nans(self):
         N = float('nan')
         T = (N, N)
         assert N in T
         assert T == (N, N)
         assert (0.0, 0.0) == (-0.0, -0.0)
+
+    def test_issue3301_exactly_two_bases(self):
+        # used to fail because the 2-tuple of bases gets specialized;
+        # the test would always pass with any number of bases != 2...
+        class BaseA: pass
+        class BaseB: pass
+        class Foo(BaseA, BaseB): pass
+        assert not hasattr(Foo, '__orig_bases__')
 
 
 class AppTestAll(test_tupleobject.AppTestW_TupleObject):

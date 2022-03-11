@@ -1,14 +1,17 @@
 import sys
 
 from rpython.rlib.objectmodel import specialize
+from rpython.rlib.rarithmetic import ovfcheck
 from rpython.rlib import jit
 from rpython.rlib.debug import check_nonneg
 from pypy.interpreter import gateway
 from pypy.interpreter.baseobjspace import W_Root
 from pypy.interpreter.typedef import TypeDef, make_weakref_descr
 from pypy.interpreter.typedef import GetSetProperty
-from pypy.interpreter.gateway import interp2app, unwrap_spec
+from pypy.interpreter.gateway import interp2app, unwrap_spec, WrappedDefault
 from pypy.interpreter.error import OperationError, oefmt
+from pypy.objspace.std.sliceobject import unwrap_start_stop
+from pypy.objspace.std.util import generic_alias_class_getitem
 
 
 # A `dequeobject` is composed of a doubly-linked list of `block` nodes.
@@ -50,7 +53,9 @@ class Block(object):
         self.data = [None] * BLOCKLEN
 
 class Lock(object):
-    pass
+    """This is not a lock.  It is a marker to detect concurrent
+    modifications (including in the single-threaded case).
+    """
 
 
 def get_printable_location(tp):
@@ -182,8 +187,56 @@ class W_Deque(W_Root):
                 raise
             self.append(w_obj)
 
+    def add(self, w_deque):
+        deque = self.space.interp_w(W_Deque, w_deque)
+        copy = W_Deque(self.space)
+        copy.maxlen = self.maxlen
+        copy.extend(self.iter())
+        copy.extend(deque.iter())
+        return copy
+
     def iadd(self, w_iterable):
         self.extend(w_iterable)
+        return self
+
+    def mul(self, w_int):
+        space = self.space
+        num = space.int_w(w_int)
+        try:
+            ovfcheck(self.len * num)
+        except OverflowError:
+            raise MemoryError
+        copied = W_Deque(space)
+        copied.maxlen = self.maxlen
+
+        for _ in range(num):
+            copied.extend(self)
+
+        return copied
+
+    def rmul(self, w_int):
+        return self.mul(w_int)
+
+    def imul(self, w_int):
+        space = self.space
+        num = space.int_w(w_int)
+        if self.len == 0 or num == 1:
+            return self
+        if num <= 0:
+            self.clear()
+            return self
+        try:
+            ovfcheck(self.len * num)
+        except OverflowError:
+            raise MemoryError
+        # use a copy to extend self
+        copy = W_Deque(space)
+        copy.maxlen = self.maxlen
+        copy.extend(self.iter())
+
+        for _ in range(num - 1):
+            self.extend(copy)
+
         return self
 
     def extendleft(self, w_iterable):
@@ -193,7 +246,6 @@ class W_Deque(W_Root):
         if space.is_w(self, w_iterable):
             w_iterable = space.call_function(space.w_list, w_iterable)
         #
-        space = self.space
         w_iter = space.iter(w_iterable)
         while True:
             try:
@@ -278,6 +330,10 @@ class W_Deque(W_Root):
                         "deque.remove(x): x not in deque")
         self.del_item(i)
 
+    def contains(self, w_x):
+        i = self._find(w_x)
+        return self.space.newbool(i >= 0)
+
     def reverse(self):
         "Reverse *IN PLACE*."
         li = self.leftindex
@@ -316,6 +372,49 @@ class W_Deque(W_Root):
 
     def iter(self):
         return W_DequeIter(self)
+
+    @unwrap_spec(w_start=WrappedDefault(0), w_stop=WrappedDefault(sys.maxint))
+    def index(self, w_x, w_start, w_stop):
+        space = self.space
+        w_iter = space.iter(self)
+        _len = self.len
+        lock = self.getlock()
+
+        start, stop = unwrap_start_stop(space, _len, w_start, w_stop)
+
+        for i in range(0, min(_len, stop)):
+            try:
+                w_obj = space.next(w_iter)
+                if i < start:
+                    continue
+                if space.eq_w(w_obj, w_x):
+                    return space.newint(i)
+                self.checklock(lock)
+            except OperationError as e:
+                if not e.match(space, space.w_StopIteration):
+                    raise
+        raise oefmt(space.w_ValueError, "%R is not in deque", w_x)
+
+    @unwrap_spec(index=int)
+    def insert(self, index, w_value):
+        space = self.space
+        n = space.len_w(self)
+        if n >= self.maxlen:
+            raise oefmt(space.w_IndexError, "deque already at its maximum size")
+
+        if index >= n:
+            self.append(w_value)
+            return
+        if index <= -n or index == 0:
+            self.appendleft(w_value)
+            return
+
+        self.rotate(-index)
+        if index < 0:
+            self.append(w_value)
+        else:
+            self.appendleft(w_value)
+        self.rotate(index)
 
     def reviter(self):
         "Return a reverse iterator over the deque."
@@ -411,23 +510,14 @@ class W_Deque(W_Root):
         "Return state information for pickling."
         space = self.space
         w_type = space.type(self)
-        w_dict = space.findattr(self, space.newtext('__dict__'))
-        w_list = space.call_function(space.w_list, self)
-        if w_dict is None:
-            if self.maxlen == sys.maxint:
-                result = [
-                    w_type, space.newtuple([w_list])]
-            else:
-                result = [
-                    w_type, space.newtuple([w_list, space.newint(self.maxlen)])]
+        w_dict = space.findattr(self, space.newtext('__dict__')) or space.w_None
+        w_it = space.iter(self)
+        if self.maxlen == sys.maxint:
+            w_lentuple = space.newtuple([])
         else:
-            if self.maxlen == sys.maxint:
-                w_len = space.w_None
-            else:
-                w_len = space.newint(self.maxlen)
-            result = [
-                w_type, space.newtuple([w_list, w_len]), w_dict]
-        return space.newtuple(result)
+            w_lentuple = space.newtuple([space.newtuple([]),
+                                         space.newint(self.maxlen)])
+        return space.newtuple([w_type, w_lentuple, w_dict, w_it])
 
     def get_maxlen(space, self):
         if self.maxlen == sys.maxint:
@@ -440,7 +530,9 @@ app = gateway.applevel("""
     def dequerepr(currently_in_repr, d):
         'The app-level part of repr().'
         if d in currently_in_repr:
-            listrepr = '[...]'
+            return '[...]'   # strange because it's a deque and this
+                             # strongly suggests it's a list instead,
+                             # but confirmed behavior from python-dev
         else:
             currently_in_repr[d] = 1
             try:
@@ -454,7 +546,7 @@ app = gateway.applevel("""
             maxlenrepr = ''
         else:
             maxlenrepr = ', maxlen=%d' % (d.maxlen,)
-        return 'deque(%s%s)' % (listrepr, maxlenrepr)
+        return '%s(%s%s)' % (d.__class__.__name__, listrepr, maxlenrepr)
 """, filename=__file__)
 
 dequerepr = app.interphook("dequerepr")
@@ -477,11 +569,14 @@ Build an ordered collection accessible from endpoints only.""",
     count      = interp2app(W_Deque.count),
     extend     = interp2app(W_Deque.extend),
     extendleft = interp2app(W_Deque.extendleft),
+    index      = interp2app(W_Deque.index),
+    insert     = interp2app(W_Deque.insert),
     pop        = interp2app(W_Deque.pop),
     popleft    = interp2app(W_Deque.popleft),
     remove     = interp2app(W_Deque.remove),
     reverse    = interp2app(W_Deque.reverse),
     rotate     = interp2app(W_Deque.rotate),
+    copy       = interp2app(W_Deque.copy),
     __weakref__ = make_weakref_descr(W_Deque),
     __iter__ = interp2app(W_Deque.iter),
     __reversed__ = interp2app(W_Deque.reviter),
@@ -494,13 +589,22 @@ Build an ordered collection accessible from endpoints only.""",
     __gt__ = interp2app(W_Deque.gt),
     __ge__ = interp2app(W_Deque.ge),
     __hash__ = None,
+    __add__ = interp2app(W_Deque.add),
     __iadd__ = interp2app(W_Deque.iadd),
     __getitem__ = interp2app(W_Deque.getitem),
     __setitem__ = interp2app(W_Deque.setitem),
     __delitem__ = interp2app(W_Deque.delitem),
     __copy__ = interp2app(W_Deque.copy),
     __reduce__ = interp2app(W_Deque.reduce),
+    __mul__ = interp2app(W_Deque.mul),
+    __imul__ = interp2app(W_Deque.imul),
+    __rmul__ = interp2app(W_Deque.rmul),
     maxlen = GetSetProperty(W_Deque.get_maxlen),
+    __contains__ = interp2app(W_Deque.contains),
+
+    __class_getitem__ = interp2app(
+        generic_alias_class_getitem, as_classmethod=True),
+
 )
 
 # ------------------------------------------------------------
@@ -515,6 +619,14 @@ class W_DequeIter(W_Root):
         self.lock = deque.getlock()
         check_nonneg(self.index)
 
+    def _move_to(self, index):
+        if index < 0:
+            return
+        self.counter = self.deque.len - index
+        if self.counter <= 0:
+            return
+        self.block, self.index = self.deque.locate(index)
+
     def iter(self):
         return self
 
@@ -526,7 +638,7 @@ class W_DequeIter(W_Root):
         if self.lock is not self.deque.lock:
             self.counter = 0
             raise oefmt(space.w_RuntimeError, "deque mutated during iteration")
-        if self.counter == 0:
+        if self.counter <= 0:
             raise OperationError(space.w_StopIteration, space.w_None)
         self.counter -= 1
         ri = self.index
@@ -538,10 +650,28 @@ class W_DequeIter(W_Root):
         self.index = ri
         return w_x
 
-W_DequeIter.typedef = TypeDef("deque_iterator",
+    def reduce(self):
+        w_i = self.space.newint(self.deque.len - self.counter)
+        return self.space.newtuple([self.space.gettypefor(W_DequeIter),
+                                    self.space.newtuple([self.deque, w_i])])
+
+@unwrap_spec(index=int)
+def W_DequeIter__new__(space, w_subtype, w_deque, index=0):
+    w_self = space.allocate_instance(W_DequeIter, w_subtype)
+    if not isinstance(w_deque, W_Deque):
+        raise oefmt(space.w_TypeError, "must be collections.deque, not %T", w_deque)
+
+    self = space.interp_w(W_DequeIter, w_self)
+    W_DequeIter.__init__(self, w_deque)
+    self._move_to(index)
+    return w_self
+
+W_DequeIter.typedef = TypeDef("_collections.deque_iterator",
+    __new__ = interp2app(W_DequeIter__new__),
     __iter__        = interp2app(W_DequeIter.iter),
     __length_hint__ = interp2app(W_DequeIter.length),
-    next            = interp2app(W_DequeIter.next),
+    __next__        = interp2app(W_DequeIter.next),
+    __reduce__      = interp2app(W_DequeIter.reduce)
 )
 W_DequeIter.typedef.acceptable_as_base_class = False
 
@@ -557,6 +687,14 @@ class W_DequeRevIter(W_Root):
         self.lock = deque.getlock()
         check_nonneg(self.index)
 
+    def _move_to(self, index):
+        if index < 0:
+            return
+        self.counter = self.deque.len - index
+        if self.counter <= 0:
+            return
+        self.block, self.index = self.deque.locate(self.counter - 1)
+
     def iter(self):
         return self
 
@@ -568,7 +706,7 @@ class W_DequeRevIter(W_Root):
         if self.lock is not self.deque.lock:
             self.counter = 0
             raise oefmt(space.w_RuntimeError, "deque mutated during iteration")
-        if self.counter == 0:
+        if self.counter <= 0:
             raise OperationError(space.w_StopIteration, space.w_None)
         self.counter -= 1
         ri = self.index
@@ -580,10 +718,28 @@ class W_DequeRevIter(W_Root):
         self.index = ri
         return w_x
 
-W_DequeRevIter.typedef = TypeDef("deque_reverse_iterator",
+    def reduce(self):
+        w_i = self.space.newint(self.deque.len - self.counter)
+        return self.space.newtuple([self.space.gettypefor(W_DequeRevIter),
+                                    self.space.newtuple([self.deque, w_i])])
+
+@unwrap_spec(index=int)
+def W_DequeRevIter__new__(space, w_subtype, w_deque, index=0):
+    w_self = space.allocate_instance(W_DequeRevIter, w_subtype)
+    if not isinstance(w_deque, W_Deque):
+        raise oefmt(space.w_TypeError, "must be collections.deque, not %T", w_deque)
+
+    self = space.interp_w(W_DequeRevIter, w_self)
+    W_DequeRevIter.__init__(self, w_deque)
+    self._move_to(index)
+    return w_self
+
+W_DequeRevIter.typedef = TypeDef("_collections.deque_reverse_iterator",
+    __new__         = interp2app(W_DequeRevIter__new__),
     __iter__        = interp2app(W_DequeRevIter.iter),
     __length_hint__ = interp2app(W_DequeRevIter.length),
-    next            = interp2app(W_DequeRevIter.next),
+    __next__        = interp2app(W_DequeRevIter.next),
+    __reduce__      = interp2app(W_DequeRevIter.reduce)
 )
 W_DequeRevIter.typedef.acceptable_as_base_class = False
 

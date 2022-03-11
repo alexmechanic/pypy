@@ -509,11 +509,8 @@ Create an instance method object.""",
     __new__          = interp2app(MethodWithProps.descr_method__new__.im_func),
     __call__         = interp2app(MethodWithProps.descr_method_call),
     __get__          = interp2app(MethodWithProps.descr_method_get),
-    im_func          = interp_attrproperty_w('w_function', cls=MethodWithProps),
     __func__         = interp_attrproperty_w('w_function', cls=MethodWithProps),
-    im_self          = interp_attrproperty_w('w_instance', cls=MethodWithProps),
     __self__         = interp_attrproperty_w('w_instance', cls=MethodWithProps),
-    im_class         = interp_attrproperty_w('w_class', cls=MethodWithProps),
     __getattribute__ = interp2app(MethodWithProps.descr_method_getattribute),
     __eq__           = interp2app(MethodWithProps.descr_method_eq),
     __ne__           = descr_generic_ne,
@@ -554,9 +551,9 @@ class W_CPPOverload(W_Root):
                             not space.is_w(w_obj, space.w_None) or
                             space.is_w(w_cls, space.type(space.w_None)))
         if asking_for_bound:
-            return MethodWithProps(space, self, w_obj, w_cls)
+            return MethodWithProps(space, self, w_obj)
         else:
-            return MethodWithProps(space, self, None, w_cls)
+            return self   # unbound methods don't exist in Python 3
 
     @unwrap_spec(args_w='args_w')
     def call_args(self, args_w):
@@ -717,7 +714,7 @@ class W_CPPStaticOverload(W_CPPOverload):
             # onto a class and w_this should be set
             cppinstance = self.space.interp_w(W_CPPInstance, w_obj)
             if cppinstance.clsdecl.handle != self.scope.handle:
-                return MethodWithProps(self.space, self, w_obj, w_cls)    # bound
+                return MethodWithProps(self.space, self, w_obj)    # bound
         return self      # unbound
 
     @unwrap_spec(args_w='args_w')

@@ -125,10 +125,6 @@ def test_truncate():
     res = sio.truncate(4)
     assert res == 4
     assert sio.getvalue() == s[:4]
-    # truncate() accepts long objects
-    res = sio.truncate(4L)
-    assert res == 4
-    assert sio.getvalue() == s[:4]
     assert sio.tell() == 6
     sio.seek(0, 2)
     sio.write(s)
@@ -239,6 +235,8 @@ def test_newline_property():
     assert sio.newlines == ("\n", "\r\n")
     sio.write(u"c\rd")
     assert sio.newlines == ("\r", "\n", "\r\n")
+    exc = raises(TypeError, StringIO, newline=b'\n')
+    assert 'bytes' in str(exc.value)
 
 def test_iterator():
 
@@ -247,7 +245,7 @@ def test_iterator():
 
     assert iter(sio) is sio
     assert hasattr(sio, "__iter__")
-    assert hasattr(sio, "next")
+    assert hasattr(sio, "__next__")
 
     i = 0
     for line in sio:
@@ -271,7 +269,7 @@ def test_getstate():
     sio = StringIO()
     state = sio.__getstate__()
     assert len(state) == 4
-    assert isinstance(state[0], unicode)
+    assert isinstance(state[0], str)
     assert isinstance(state[1], str)
     assert isinstance(state[2], int)
     assert state[3] is None or isinstance(state[3], dict)

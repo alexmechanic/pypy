@@ -1,12 +1,12 @@
 import time
 
-from pypy.interpreter.error import oefmt
+from pypy.interpreter.error import oefmt, OperationError
 from pypy.interpreter.typedef import TypeDef
 from pypy.interpreter.gateway import interp2app, unwrap_spec
 from pypy.interpreter.baseobjspace import W_Root
+from pypy.module.posix import interp_posix
 from rpython.rlib.rarithmetic import r_uint, intmask, widen
 from rpython.rlib import rbigint, rrandom, rstring
-
 
 def descr_new__(space, w_subtype, __args__):
     w_anything = __args__.firstarg()
@@ -25,16 +25,19 @@ class W_Random(W_Root):
         return space.newfloat(self._rnd.random())
 
     def seed(self, space, w_n=None):
-        if w_n is None:
-            w_n = space.newint(int(time.time()))
+        if space.is_none(w_n):
+            # TODO: Use a non-blocking version of urandom
+            try:
+                w_n = interp_posix.urandom(space, 8)
+            except OperationError as e:
+                if not e.match(space, space.w_OSError):
+                    raise
+                w_n = space.newint(int(time.time() * 256))
+        if space.isinstance_w(w_n, space.w_int):
+            w_n = space.abs(w_n)
         else:
-            if space.isinstance_w(w_n, space.w_int):
-                w_n = space.abs(w_n)
-            elif space.isinstance_w(w_n, space.w_long):
-                w_n = space.abs(w_n)
-            else:
-                n = space.hash_w(w_n)
-                w_n = space.newint(r_uint(n))
+            n = space.hash_w(w_n)
+            w_n = space.newint(r_uint(n))
         key = []
         w_one = space.newint(1)
         w_two = space.newint(2)
@@ -80,19 +83,13 @@ class W_Random(W_Root):
         self._rnd.state = _state
         self._rnd.index = index
 
-    def jumpahead(self, space, w_n):
-        if space.isinstance_w(w_n, space.w_long):
-            num = space.bigint_w(w_n)
-            n = intmask(num.uintmask())
-        else:
-            n = space.int_w(w_n)
-        self._rnd.jumpahead(n)
-
     @unwrap_spec(k=int)
     def getrandbits(self, space, k):
-        if k <= 0:
+        if k < 0:
             raise oefmt(space.w_ValueError,
-                        "number of bits must be greater than zero")
+                        "number of bits must be non-negative")
+        if k == 0:
+            return space.newint(0)
         bytes = ((k - 1) // 32 + 1) * 4
         bytesarray = rstring.StringBuilder(bytes)
         for i in range(0, bytes, 4):
@@ -117,6 +114,5 @@ W_Random.typedef = TypeDef("Random",
     seed = interp2app(W_Random.seed),
     getstate = interp2app(W_Random.getstate),
     setstate = interp2app(W_Random.setstate),
-    jumpahead = interp2app(W_Random.jumpahead),
     getrandbits = interp2app(W_Random.getrandbits),
 )

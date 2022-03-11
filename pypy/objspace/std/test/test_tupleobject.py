@@ -1,3 +1,4 @@
+import pytest
 from pypy.interpreter.error import OperationError
 from pypy.objspace.std.tupleobject import W_TupleObject
 
@@ -42,8 +43,8 @@ class TestW_TupleObject:
         assert self.space.eq_w(self.space.next(w_iter), w(5))
         assert self.space.eq_w(self.space.next(w_iter), w(3))
         assert self.space.eq_w(self.space.next(w_iter), w(99))
-        raises(OperationError, self.space.next, w_iter)
-        raises(OperationError, self.space.next, w_iter)
+        pytest.raises(OperationError, self.space.next, w_iter)
+        pytest.raises(OperationError, self.space.next, w_iter)
 
     def test_contains(self):
         w = self.space.wrap
@@ -233,6 +234,16 @@ class TestW_TupleObject:
         assert self.space.eq_w(self.space.le(w_tuple4, w_tuple3),
                            self.space.w_True)
 
+    def test_hash_consistency(self):
+        # make sure that the two copies of the hash implementation are the same
+        w = self.space.wrap
+        w_tuple1 = W_TupleObject([w(5), w(3), w(99)])
+        w_tuple2 = W_TupleObject([w(5), w(3), w(99)])
+        w_tuple3 = W_TupleObject([w(5), w(3), w(99), w(-1)])
+        w_tuple4 = W_TupleObject([w(5), w(3), w(9), w(-1)])
+        for w_tup in w_tuple1, w_tuple2, w_tuple3, w_tuple4:
+            assert w_tup._descr_hash_unroll(self.space) == w_tup._descr_hash_jitdriver(self.space)
+
 
 class AppTestW_TupleObject:
     def test_is_true(self):
@@ -257,10 +268,10 @@ class AppTestW_TupleObject:
     def test_iter(self):
         t = (5, 3, 99)
         i = iter(t)
-        assert i.next() == 5
-        assert i.next() == 3
-        assert i.next() == 99
-        raises(StopIteration, i.next)
+        assert next(i) == 5
+        assert next(i) == 3
+        assert next(i) == 99
+        raises(StopIteration, next, i)
 
     def test_contains(self):
         t = (5, 3, 99)
@@ -346,10 +357,22 @@ class AppTestW_TupleObject:
         assert t2 <= t3
 
     def test_hash(self):
-        # check that hash behaves as in 2.4 for at least 31 bits
-        assert hash(()) & 0x7fffffff == 0x35d373
-        assert hash((12,)) & 0x7fffffff == 0x1cca0557
-        assert hash((12, 34)) & 0x7fffffff == 0x153e2a41
+        # check that hash behaves as in 3.8
+        import sys
+        is_32 = sys.maxsize == 2 ** 31 - 1
+        def check_one_exact(t, h32, h64):
+            h = hash(t)
+            if is_32:
+                assert h == h32
+            else:
+                assert h == h64
+
+        check_one_exact((), 750394483, 5740354900026072187)
+        check_one_exact((0,), 1214856301, -8753497827991233192)
+        check_one_exact((0, 0), -168982784, -8458139203682520985)
+        check_one_exact((0.5,), 2077348973, -408149959306781352)
+        check_one_exact((0.5, (), (-2, 3, (4, 6))), 714642271,
+                        -1845940830829704396)
 
     def test_getnewargs(self):
         assert () .__getnewargs__() == ((),)
@@ -358,9 +381,11 @@ class AppTestW_TupleObject:
         assert repr((1,)) == '(1,)'
         assert repr(()) == '()'
         assert repr((1, 2, 3)) == '(1, 2, 3)'
+        assert repr(('\xe9',)) == "('\xe9',)"
+        assert repr(('\xe9', 1)) == "('\xe9', 1)"
 
     def test_getslice(self):
-        assert ('a', 'b', 'c').__getslice__(-17, 2) == ('a', 'b')
+        assert ('a', 'b', 'c')[-17: 2] == ('a', 'b')
 
     def test_count(self):
         assert ().count(4) == 0
@@ -436,24 +461,6 @@ class AppTestW_TupleObject:
         assert ((1,) != object()) is True
         assert ((1, 2) != object()) is True
 
-    def test_zip_two_lists(self):
-        try:
-            from __pypy__ import specialized_zip_2_lists
-        except ImportError:
-            specialized_zip_2_lists = zip
-        else:
-            raises(TypeError, specialized_zip_2_lists, [], ())
-            raises(TypeError, specialized_zip_2_lists, (), [])
-        assert specialized_zip_2_lists([], []) == [
-            ]
-        assert specialized_zip_2_lists([2, 3], []) == [
-            ]
-        assert specialized_zip_2_lists([2, 3], [4, 5, 6]) == [
-            (2, 4), (3, 5)]
-        assert specialized_zip_2_lists([4.1, 3.6, 7.2], [2.3, 4.8]) == [
-            (4.1, 2.3), (3.6, 4.8)]
-        assert specialized_zip_2_lists(["foo", "bar"], [6, 2]) == [
-            ("foo", 6), ("bar", 2)]
 
     def test_error_message_wrong_self(self):
         unboundmeth = tuple.__hash__
@@ -462,3 +469,7 @@ class AppTestW_TupleObject:
         if hasattr(unboundmeth, 'im_func'):
             e = raises(TypeError, unboundmeth.im_func, 42)
             assert "'tuple'" in str(e.value)
+
+    def test_tuple_new_pos_only(self):
+        with raises(TypeError):
+            tuple(sequence=[])

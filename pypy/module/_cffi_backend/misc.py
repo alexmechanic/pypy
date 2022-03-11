@@ -9,6 +9,7 @@ from rpython.rlib.objectmodel import specialize, we_are_translated
 from rpython.rlib.rarithmetic import r_uint, r_ulonglong
 from rpython.rlib.unroll import unrolling_iterable
 from rpython.rlib.rdynload import dlopen, DLOpenError, DLLHANDLE
+from rpython.rlib.nonconst import NonConstant
 from rpython.rtyper.lltypesystem import lltype, llmemory, rffi
 from rpython.translator.tool.cbuild import ExternalCompilationInfo
 
@@ -145,16 +146,15 @@ def as_long_long(space, w_ob):
     # (possibly) convert and cast a Python object to a long long.
     # This version accepts a Python int too, and does convertions from
     # other types of objects.  It refuses floats.
-    if space.isinstance_w(w_ob, space.w_int):  # shortcut
-        return space.int_w(w_ob)
     try:
-        bigint = space.bigint_w(w_ob, allow_conversion=False)
+        return space.int_w(w_ob, allow_conversion=False)
     except OperationError as e:
-        if not e.match(space, space.w_TypeError):
+        if not (e.match(space, space.w_OverflowError) or
+                e.match(space, space.w_TypeError)):
             raise
         if _is_a_float(space, w_ob):
             raise
-        bigint = space.bigint_w(space.int(w_ob), allow_conversion=False)
+    bigint = space.bigint_w(w_ob, allow_conversion=True)
     try:
         return bigint.tolonglong()
     except OverflowError:
@@ -162,30 +162,35 @@ def as_long_long(space, w_ob):
 
 def as_long(space, w_ob):
     # Same as as_long_long(), but returning an int instead.
-    if space.isinstance_w(w_ob, space.w_int):  # shortcut
-        return space.int_w(w_ob)
-    if _is_a_float(space, w_ob):
-        space.bigint_w(w_ob, allow_conversion=False)   # raise the right error
-    return space.int_w(space.int(w_ob))
+    try:
+        return space.int_w(w_ob, allow_conversion=False)
+    except OperationError as e:
+        if not (e.match(space, space.w_OverflowError) or
+                e.match(space, space.w_TypeError)):
+            raise
+        if _is_a_float(space, w_ob):
+            raise
+    return space.int_w(w_ob, allow_conversion=True)
 
 def as_unsigned_long_long(space, w_ob, strict):
     # (possibly) convert and cast a Python object to an unsigned long long.
     # This accepts a Python int too, and does convertions from other types of
     # objects.  If 'strict', complains with OverflowError; if 'not strict',
     # mask the result and round floats.
-    if space.isinstance_w(w_ob, space.w_int):  # shortcut
-        value = space.int_w(w_ob)
-        if strict and value < 0:
-            raise OperationError(space.w_OverflowError, space.newtext(neg_msg))
-        return r_ulonglong(value)
     try:
-        bigint = space.bigint_w(w_ob, allow_conversion=False)
+        value = space.int_w(w_ob, allow_conversion=False)
     except OperationError as e:
-        if not e.match(space, space.w_TypeError):
+        if not (e.match(space, space.w_OverflowError) or
+                e.match(space, space.w_TypeError)):
             raise
         if strict and _is_a_float(space, w_ob):
             raise
-        bigint = space.bigint_w(space.int(w_ob), allow_conversion=False)
+    else:
+        if strict and value < 0:
+            raise OperationError(space.w_OverflowError, space.newtext(neg_msg))
+        return r_ulonglong(value)
+    # note that if not 'strict', then space.int() will round down floats
+    bigint = space.bigint_w(space.int(w_ob), allow_conversion=False)
     if strict:
         try:
             return bigint.toulonglong()
@@ -198,21 +203,23 @@ def as_unsigned_long_long(space, w_ob, strict):
 
 def as_unsigned_long(space, w_ob, strict):
     # same as as_unsigned_long_long(), but returning just an Unsigned
-    if space.isinstance_w(w_ob, space.w_int):  # shortcut
-        value = space.int_w(w_ob)
-        if not we_are_translated():
-            value = getattr(value, 'constant', value)   # for NonConstant
-        if strict and value < 0:
-            raise OperationError(space.w_OverflowError, space.newtext(neg_msg))
-        return r_uint(value)
     try:
-        bigint = space.bigint_w(w_ob, allow_conversion=False)
+        value = space.int_w(w_ob, allow_conversion=False)
     except OperationError as e:
-        if not e.match(space, space.w_TypeError):
+        if not (e.match(space, space.w_OverflowError) or
+                e.match(space, space.w_TypeError)):
             raise
         if strict and _is_a_float(space, w_ob):
             raise
-        bigint = space.bigint_w(space.int(w_ob), allow_conversion=False)
+    else:
+        if strict and value < 0:
+            raise OperationError(space.w_OverflowError, space.newtext(neg_msg))
+        if not we_are_translated():
+            if isinstance(value, NonConstant):   # hack for test_ztranslation
+                return r_uint(0)
+        return r_uint(value)
+    # note that if not 'strict', then space.int() will round down floats
+    bigint = space.bigint_w(space.int(w_ob), allow_conversion=False)
     if strict:
         try:
             return bigint.touint()
@@ -245,9 +252,12 @@ class _NotStandardObject(Exception):
 
 def _standard_object_as_bool(space, w_ob):
     if space.isinstance_w(w_ob, space.w_int):
-        return space.int_w(w_ob) != 0
-    if space.isinstance_w(w_ob, space.w_long):
-        return space.bigint_w(w_ob).tobool()
+        try:
+            return space.int_w(w_ob) != 0
+        except OperationError as e:
+            if not e.match(space, space.w_OverflowError):
+                raise
+            return space.bigint_w(w_ob).tobool()
     if space.isinstance_w(w_ob, space.w_float):
         return space.float_w(w_ob) != 0.0
     raise _NotStandardObject
@@ -418,7 +428,7 @@ def dlopen_w(space, w_filename, flags):
         autoclose = False
         #
     elif WIN32 and space.isinstance_w(w_filename, space.w_unicode):
-        fname = space.text_w(space.repr(w_filename))
+        fname = space.text_w(w_filename)
         utf8_name = space.utf8_w(w_filename)
         uni_len = space.len_w(w_filename)
         with rffi.scoped_utf82wcharp(utf8_name, uni_len) as ll_libname:

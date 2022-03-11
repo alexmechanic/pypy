@@ -22,10 +22,11 @@ def decode_error_handler(space):
                                              space.newtext(msg)]))
     return raise_unicode_exception_decode
 
-def _decode_never_raise(errors, encoding, msg, s, startingpos, endingpos):
+def decode_never_raise(errors, encoding, msg, s, startingpos, endingpos):
     assert startingpos >= 0
+    assert endingpos >= 0
     ux = ['\ux' + hex(ord(x))[2:].upper() for x in s[startingpos:endingpos]]
-    return ''.join(ux), endingpos, 'b'
+    return ''.join(ux), endingpos, 'b', ''
 
 @specialize.memo()
 def encode_error_handler(space):
@@ -55,6 +56,66 @@ def default_error_encode(
 _WIN32 = sys.platform == 'win32'
 _MACOSX = sys.platform == 'darwin'
 
+def fsdecode(space, w_string):
+    from pypy.module._codecs import interp_codecs
+    state = space.fromcache(interp_codecs.CodecState)
+    errorhandler=state.decode_error_handler
+    utf8 = space.bytes_w(w_string)
+    # fast path for ascii
+    if rutf8.first_non_ascii_char(utf8) < 0:
+        return space.newtext(utf8, len(utf8))
+    if _WIN32:
+        import pypy.interpreter.unicodehelper_win32 as win32
+        slen = len(utf8)
+        utf8, _, lgt = str_decode_utf8(utf8, 'surrogateescape', True, errorhandler)
+    elif 0 and  _MACOSX:
+        utf8, lgt, pos  = str_decode_utf8(utf8, 'surrogateescape', True,
+                                    errorhandler, allow_surrogates=False)
+    elif space.sys.filesystemencoding is None or state.codec_need_encodings:
+        # bootstrap check: if the filesystemencoding isn't initialized
+        # or the filesystem codec is implemented in Python we cannot
+        # use it before the codecs are ready. use the locale codec
+        # instead
+        from pypy.module._codecs.locale import (
+            str_decode_locale_surrogateescape)
+        utf8, lgt = str_decode_locale_surrogateescape(utf8)
+    else:
+        from pypy.module.sys.interp_encoding import getfilesystemencoding
+        return space.call_method(w_string, 'decode',
+                                 getfilesystemencoding(space),
+                                 space.newtext('surrogateescape'))
+    return space.newtext(utf8, lgt)
+
+def fsencode(space, w_uni):
+    from pypy.module._codecs import interp_codecs
+    state = space.fromcache(interp_codecs.CodecState)
+    if _WIN32:
+        errorhandler=state.encode_error_handler
+        utf8 = space.utf8_w(w_uni)
+        bytes = utf8_encode_utf_8(utf8, 'surrogateescape', errorhandler)
+    elif 0 and _MACOSX:
+        utf8 = space.utf8_w(w_uni)
+        errorhandler=state.encode_error_handler,
+        bytes = utf8_encode_utf_8(utf8, 'surrogateescape', errorhandler,
+                                  allow_surrogates=False)
+    elif space.sys.filesystemencoding is None or state.codec_need_encodings:
+        # bootstrap check: if the filesystemencoding isn't initialized
+        # or the filesystem codec is implemented in Python we cannot
+        # use it before the codecs are ready. use the locale codec
+        # instead
+        from pypy.module._codecs.locale import (
+            utf8_encode_locale_surrogateescape)
+        utf8 = space.utf8_w(w_uni)
+        ulen = space.len_w(w_uni)
+        if '\x00' in utf8:
+            raise oefmt(space.w_ValueError, "embedded null character")
+        bytes = utf8_encode_locale_surrogateescape(utf8, ulen)
+    else:
+        from pypy.module.sys.interp_encoding import getfilesystemencoding
+        return space.call_method(w_uni, 'encode',
+                                 getfilesystemencoding(space),
+                                 space.newtext('surrogateescape'))
+    return space.newbytes(bytes)
 
 def encode(space, w_data, encoding=None, errors='strict'):
     from pypy.objspace.std.unicodeobject import encode_object
@@ -62,22 +123,11 @@ def encode(space, w_data, encoding=None, errors='strict'):
 
 
 # These functions take and return unwrapped rpython strings
-def decode_unicode_escape(space, string):
-    from pypy.module._codecs import interp_codecs
-    state = space.fromcache(interp_codecs.CodecState)
-    unicodedata_handler = state.get_unicodedata_handler(space)
-    result_utf8, consumed, length = str_decode_unicode_escape(
-        string, "strict",
-        final=True,
-        errorhandler=decode_error_handler(space),
-        ud_handler=unicodedata_handler)
-    return result_utf8, length
 
 def decode_raw_unicode_escape(space, string):
-    result_utf8, consumed, lgt = str_decode_raw_unicode_escape(
+    return str_decode_raw_unicode_escape(
         string, "strict",
         final=True, errorhandler=decode_error_handler(space))
-    return result_utf8, lgt
 
 def check_ascii_or_raise(space, string):
     try:
@@ -92,16 +142,14 @@ def check_utf8_or_raise(space, string, start=0, end=-1):
     # Surrogates are accepted and not treated specially at all.
     # If there happen to be two 3-bytes encoding a pair of surrogates,
     # you still get two surrogate unicode characters in the result.
-    # These are the Python2 rules; Python3 differs.
+    # These are the Python3 rules, Python2 differs
+    assert isinstance(string, str)
     try:
-        length = rutf8.check_utf8(string, True, start, end)
+        return rutf8.check_utf8(string, True, start, end)
     except rutf8.CheckError as e:
-        # convert position into unicode position
-        lgt = rutf8.check_utf8(string, True, start, stop=e.pos)
-        decode_error_handler(space)('strict', 'utf8', 'invalid utf-8', string,
-                                    start + lgt, start + lgt + 1)
-        assert False, "unreachable"
-    return length
+        decode_error_handler(space)('strict', 'utf-8',
+                                    'unexpected end of data', string,
+                                    e.pos, e.pos + 1)
 
 def str_decode_ascii(s, errors, final, errorhandler):
     try:
@@ -116,7 +164,7 @@ def _str_decode_ascii_slowpath(s, errors, final, errorhandler):
     while i < len(s):
         ch = s[i]
         if ord(ch) > 0x7F:
-            r, i = errorhandler(errors, 'ascii', 'ordinal not in range(128)',
+            r, i, rettype, s = errorhandler(errors, 'ascii', 'ordinal not in range(128)',
                 s, i, i + 1)
             res.append(r)
         else:
@@ -124,7 +172,7 @@ def _str_decode_ascii_slowpath(s, errors, final, errorhandler):
             i += 1
     ress = res.build()
     lgt = rutf8.check_utf8(ress, True)
-    return ress, len(s), lgt
+    return ress, lgt, lgt
 
 def str_decode_latin_1(s, errors, final, errorhandler):
     try:
@@ -148,10 +196,75 @@ def _str_decode_latin_1_slowpath(s, errors, final, errorhandler):
                 end += 1
             res.append_slice(s, start, end)
             i = end
-    # cannot be ASCII, cannot have surrogates, I believe
     return res.build(), len(s), len(s)
 
-def utf8_encode_latin_1(s, errors, errorhandler):
+class ErrorHandlerError(Exception):
+    def __init__(self, new, old):
+        self.new = new
+        self.old = old
+
+def utf8_encode_utf_8(s, errors, errorhandler, allow_surrogates=False):
+    if len(s) == 0:
+        return ''
+
+    # two fast paths
+    if allow_surrogates:
+        # already valid utf-8 with surrogates, surrogates are allowed, so just
+        # return
+        return s
+    if not rutf8.has_surrogates(s):
+        # already valid utf-8 and doesn't contain surrogates, so we don't need
+        # to do anything
+        return s
+    # annoying slow path
+    return _utf8_encode_utf_8_deal_with_surrogates(s, errors, errorhandler)
+
+def _utf8_encode_utf_8_deal_with_surrogates(s, errors, errorhandler):
+    pos = 0
+    upos = 0
+    result = StringBuilder(len(s))
+    while pos < len(s):
+        try:
+            rutf8.check_utf8(s, allow_surrogates=False, start=pos)
+            # otherwise the fast path above would have triggered
+            assert pos != 0
+            result.append_slice(s, pos, len(s))
+            break
+        except rutf8.CheckError as e:
+            end = e.pos
+            assert end >= 0
+            result.append_slice(s, pos, end)
+            upos += rutf8.codepoints_in_utf8(s, start=pos, end=end)
+            pos = end
+            # Try to get collect surrogates in one pass
+            # XXX do we care about performance in this case?
+            # XXX should this loop for more than one pair?
+            delta = 1
+            uchr = rutf8.codepoint_at_pos(s, pos)
+            if 0xD800 <= uchr <= 0xDBFF:
+                pos = rutf8.next_codepoint_pos(s, pos)
+                if pos < len(s):
+                    uchr = rutf8.codepoint_at_pos(s, pos)
+                    if 0xDC00 <= uchr <= 0xDFFF:
+                        delta += 1
+            res, newindex, rettype, obj = errorhandler(errors, 'utf-8',
+                        'surrogates not allowed', s, upos, upos + delta)
+            if rettype == 'u':
+                try:
+                    rutf8.check_ascii(res)
+                except rutf8.CheckError:
+                    # this is a weird behaviour of CPython, but it's what happens
+                    errorhandler("strict", 'utf-8', 'surrogates not allowed', s, upos, upos + delta)
+                    assert 0, "unreachable"
+            s = obj
+            result.append(res)
+            if newindex <= upos:
+                raise ErrorHandlerError(newindex, upos)
+            upos = newindex
+            pos = rutf8._pos_at_index(s, upos)
+    return result.build()
+
+def utf8_encode_latin_1(s, errors, errorhandler, allow_surrogates=False):
     try:
         rutf8.check_ascii(s)
         return s
@@ -159,11 +272,10 @@ def utf8_encode_latin_1(s, errors, errorhandler):
         return _utf8_encode_latin_1_slowpath(s, e.pos, errors, errorhandler)
 
 def _utf8_encode_latin_1_slowpath(s, first_non_ascii_char, errors, errorhandler):
-    size = len(s)
-    result = StringBuilder(size)
+    result = StringBuilder(len(s))
     result.append_slice(s, 0, first_non_ascii_char)
     pos = index = first_non_ascii_char
-    while pos < size:
+    while pos < len(s):
         ch = rutf8.codepoint_at_pos(s, pos)
         if ch <= 0xFF:
             result.append(chr(ch))
@@ -173,30 +285,35 @@ def _utf8_encode_latin_1_slowpath(s, first_non_ascii_char, errors, errorhandler)
             startindex = index
             pos = rutf8.next_codepoint_pos(s, pos)
             index += 1
-            while pos < size and rutf8.codepoint_at_pos(s, pos) > 0xFF:
+            while pos < len(s) and rutf8.codepoint_at_pos(s, pos) > 0xFF:
                 pos = rutf8.next_codepoint_pos(s, pos)
                 index += 1
             msg = "ordinal not in range(256)"
-            res_8, newindex = errorhandler(
+            res, newindex, rettype, obj = errorhandler(
                 errors, 'latin1', msg, s, startindex, index)
-            for cp in rutf8.Utf8StringIterator(res_8):
-                if cp > 0xFF:
-                    errorhandler("strict", 'latin1', msg, s, startindex, index)
-                result.append(chr(cp))
+            if rettype == 'u':
+                for cp in rutf8.Utf8StringIterator(res):
+                    if cp > 0xFF:
+                        errorhandler("strict", 'latin1', msg, s, startindex, index)
+                        raise RuntimeError('error handler should not have returned')
+                    result.append(chr(cp))
+            else:
+                for ch in res:
+                    result.append(ch)
+            s = obj
             if index != newindex:  # Should be uncommon
                 index = newindex
                 pos = rutf8._pos_at_index(s, newindex)
     return result.build()
 
-def utf8_encode_ascii(s, errors, errorhandler):
+def utf8_encode_ascii(s, errors, errorhandler, allow_surrogates=False):
     """ Don't be confused - this is a slowpath for errors e.g. "ignore"
     or an obscure errorhandler
     """
-    size = len(s)
-    result = StringBuilder(size)
+    result = StringBuilder(len(s))
     index = 0
     pos = 0
-    while pos < size:
+    while pos < len(s):
         ch = rutf8.codepoint_at_pos(s, pos)
         if ch <= 0x7F:
             result.append(chr(ch))
@@ -206,66 +323,97 @@ def utf8_encode_ascii(s, errors, errorhandler):
             startindex = index
             pos = rutf8.next_codepoint_pos(s, pos)
             index += 1
-            while pos < size and rutf8.codepoint_at_pos(s, pos) > 0x7F:
+            while pos < len(s) and rutf8.codepoint_at_pos(s, pos) > 0x7F:
                 pos = rutf8.next_codepoint_pos(s, pos)
                 index += 1
             msg = "ordinal not in range(128)"
-            res_8, newindex = errorhandler(
+            res, newindex, rettype, obj = errorhandler(
                 errors, 'ascii', msg, s, startindex, index)
-            for cp in rutf8.Utf8StringIterator(res_8):
-                if cp > 0x7F:
-                    errorhandler("strict", 'ascii', msg, s, startindex, index)
-                result.append(chr(cp))
-            if index != newindex:  # Should be uncommon
-                index = newindex
-                pos = rutf8._pos_at_index(s, newindex)
+            if rettype == 'u':
+                for cp in rutf8.Utf8StringIterator(res):
+                    if cp > 0x80:
+                        errorhandler("strict", 'ascii', msg, s, startindex, index)
+                        raise RuntimeError('error handler should not have returned')
+                    result.append(chr(cp))
+            else:
+                for ch in res:
+                    result.append(ch)
+            obj = s
+            pos = rutf8._pos_at_index(s, newindex)
     return result.build()
 
-if sys.platform == 'win32':
-    def utf8_encode_mbcs(s, errors, errorhandler):
-        s = s.decode('utf-8')
-        slen = len(s)
-        res = runicode.unicode_encode_mbcs(s, slen, errors, errorhandler)
-        return res
+if _WIN32:
+    import pypy.interpreter.unicodehelper_win32 as win32
+    def utf8_encode_mbcs(s, errors, errorhandler, allow_surrogates=False):
+        return win32.utf8_encode_mbcs(s, errors, errorhandler)
+
+    def utf8_encode_utf8(s, errors, errorhandler, allow_surrogates=False):
+        return win32.utf8_encode_utf8(s, errors, errorhandler)
 
     def str_decode_mbcs(s, errors, final, errorhandler):
-        slen = len(s)
-        res, size = runicode.str_decode_mbcs(s, slen, final=final, errors=errors,
-                                           errorhandler=errorhandler)
-        return res.encode('utf8'), size, len(res)
+        res, size = win32.str_decode_mbcs(s, errors, errorhandler, final=final)
+        return res, size, size
 
-def str_decode_utf8(s, errors, final, errorhandler):
+    def utf8_encode_oem(s, errors, errorhandler, allow_surrogates=False):
+        res = win32.utf8_encode_oem(s, errors, errorhandler)
+        return res
+
+    def str_decode_oem(s, errors, final, errorhandler):
+        res, size = win32.str_decode_oem(s, errors, errorhandler, final)
+        return res, size, size
+
+    def utf8_encode_code_page(cp, s, errors, errorhandler, allow_surrogates=False):
+        res = win32.utf8_encode_code_page(cp, s, errors, errorhandler)
+        return res
+
+    def str_decode_code_page(cp, s, errors, final, errorhandler):
+        res, size = win32.str_decode_code_page(cp, s, errors, errorhandler, final)
+        return res, size, size
+
+
+def str_decode_utf8(s, errors, final, errorhandler, allow_surrogates=False):
+    try:
+        # fast version first
+        return s, rutf8.check_utf8(s, allow_surrogates=allow_surrogates), len(s)
+    except rutf8.CheckError:
+        return _str_decode_utf8_slowpath(
+            s, errors, final, errorhandler, allow_surrogates=allow_surrogates)
+
+def _str_decode_utf8_slowpath(s, errors, final, errorhandler, allow_surrogates):
     """ Same as checking for the valid utf8, but we know the utf8 is not
     valid so we're trying to either raise or pack stuff with error handler.
-    The key difference is that this is call_may_force
-    """
+    The key difference is that this is call_may_force.
 
-    # Adapted from str_decode_utf_8_impl but with a StringBuilder, not a
-    # UnicodeBuilder
-    size = len(s)
-    result = StringBuilder(size)
+    In CPython this is done in unicode_decode_utf8, which has no
+    allow_surrogates. That argument is used in at least decode_utf8sp, in
+    interpreter.error._compute_value.
+    """
+    if errors is None:
+        errors = 'strict'
+    result = StringBuilder(len(s))
     pos = 0
-    while pos < size:
+    while pos < len(s):
         ordch1 = ord(s[pos])
         # fast path for ASCII
-        if ordch1 < 0x80:
-            result.append(chr(ordch1))
+        # XXX maybe use a while loop here
+        if ordch1 <= 0x7F:
             pos += 1
+            result.append(chr(ordch1))
             continue
 
         n = ord(runicode._utf8_code_length[ordch1 - 0x80])
-        if pos + n > size:
-            if not final:
-                break
+        if pos + n > len(s):
             # argh, this obscure block of code is mostly a copy of
             # what follows :-(
-            charsleft = size - pos - 1 # either 0, 1, 2
+            charsleft = len(s) - pos - 1 # either 0, 1, 2
             # note: when we get the 'unexpected end of data' we need
-            # to care about the pos returned; it can be lower than size,
+            # to care about the pos returned; it can be lower than len(s),
             # in case we need to continue running this loop
             if not charsleft:
                 # there's only the start byte and nothing else
-                r, pos = errorhandler(errors, 'utf8',
+                if not final:
+                    break
+                r, pos, rettype, s = errorhandler(errors, 'utf-8',
                                       'unexpected end of data',
                                       s, pos, pos+1)
                 result.append(r)
@@ -273,16 +421,18 @@ def str_decode_utf8(s, errors, final, errorhandler):
             ordch2 = ord(s[pos+1])
             if n == 3:
                 # 3-bytes seq with only a continuation byte
-                if rutf8._invalid_byte_2_of_3(ordch1, ordch2, True):
+                if rutf8._invalid_byte_2_of_3(ordch1, ordch2, allow_surrogates):
                     # second byte invalid, take the first and continue
-                    r, pos = errorhandler(errors, 'utf8',
+                    r, pos, rettype, s = errorhandler(errors, 'utf-8',
                                           'invalid continuation byte',
                                           s, pos, pos+1)
                     result.append(r)
                     continue
                 else:
                     # second byte valid, but third byte missing
-                    r, pos = errorhandler(errors, 'utf8',
+                    if not final:
+                        break
+                    r, pos, rettype, s = errorhandler(errors, 'utf-8',
                                       'unexpected end of data',
                                       s, pos, pos+2)
                     result.append(r)
@@ -291,21 +441,23 @@ def str_decode_utf8(s, errors, final, errorhandler):
                 # 4-bytes seq with 1 or 2 continuation bytes
                 if rutf8._invalid_byte_2_of_4(ordch1, ordch2):
                     # second byte invalid, take the first and continue
-                    r, pos = errorhandler(errors, 'utf8',
+                    r, pos, rettype, s = errorhandler(errors, 'utf-8',
                                           'invalid continuation byte',
                                           s, pos, pos+1)
                     result.append(r)
                     continue
                 elif charsleft == 2 and rutf8._invalid_byte_3_of_4(ord(s[pos+2])):
                     # third byte invalid, take the first two and continue
-                    r, pos = errorhandler(errors, 'utf8',
+                    r, pos, rettype, s = errorhandler(errors, 'utf-8',
                                           'invalid continuation byte',
                                           s, pos, pos+2)
                     result.append(r)
                     continue
                 else:
                     # there's only 1 or 2 valid cb, but the others are missing
-                    r, pos = errorhandler(errors, 'utf8',
+                    if not final:
+                        break
+                    r, pos, rettype, s = errorhandler(errors, 'utf-8',
                                       'unexpected end of data',
                                       s, pos, pos+charsleft+1)
                     result.append(r)
@@ -313,7 +465,7 @@ def str_decode_utf8(s, errors, final, errorhandler):
             raise AssertionError("unreachable")
 
         if n == 0:
-            r, pos = errorhandler(errors, 'utf8',
+            r, pos, rettype, s = errorhandler(errors, 'utf-8',
                                   'invalid start byte',
                                   s, pos, pos+1)
             result.append(r)
@@ -324,7 +476,7 @@ def str_decode_utf8(s, errors, final, errorhandler):
         elif n == 2:
             ordch2 = ord(s[pos+1])
             if rutf8._invalid_byte_2_of_2(ordch2):
-                r, pos = errorhandler(errors, 'utf8',
+                r, pos, rettype, s = errorhandler(errors, 'utf-8',
                                       'invalid continuation byte',
                                       s, pos, pos+1)
                 result.append(r)
@@ -335,22 +487,20 @@ def str_decode_utf8(s, errors, final, errorhandler):
             pos += 2
 
         elif n == 3:
-            ordch2 = ord(s[pos + 1])
-            ordch3 = ord(s[pos + 2])
-
-            if rutf8._invalid_byte_2_of_3(ordch1, ordch2, True):
-                r, pos = errorhandler(errors, 'utf8',
+            ordch2 = ord(s[pos+1])
+            ordch3 = ord(s[pos+2])
+            if rutf8._invalid_byte_2_of_3(ordch1, ordch2, allow_surrogates):
+                r, pos, rettype, s = errorhandler(errors, 'utf-8',
                                       'invalid continuation byte',
-                                      s, pos, pos + 1)
+                                      s, pos, pos+1)
                 result.append(r)
                 continue
             elif rutf8._invalid_byte_3_of_3(ordch3):
-                r, pos = errorhandler(errors, 'utf8',
-                                      "invalid continuation byte",
-                                      s, pos, pos + 2)
+                r, pos, rettype, s = errorhandler(errors, 'utf-8',
+                                      'invalid continuation byte',
+                                      s, pos, pos+2)
                 result.append(r)
                 continue
-
             # 1110xxxx 10yyyyyy 10zzzzzz -> 00000000 xxxxyyyy yyzzzzzz
             result.append(chr(ordch1))
             result.append(chr(ordch2))
@@ -358,29 +508,27 @@ def str_decode_utf8(s, errors, final, errorhandler):
             pos += 3
 
         elif n == 4:
-            ordch2 = ord(s[pos + 1])
-            ordch3 = ord(s[pos + 2])
-            ordch4 = ord(s[pos + 3])
-
+            ordch2 = ord(s[pos+1])
+            ordch3 = ord(s[pos+2])
+            ordch4 = ord(s[pos+3])
             if rutf8._invalid_byte_2_of_4(ordch1, ordch2):
-                r, pos = errorhandler(errors, 'utf8',
+                r, pos, rettype, s = errorhandler(errors, 'utf-8',
                                       'invalid continuation byte',
-                                      s, pos, pos + 1)
+                                      s, pos, pos+1)
                 result.append(r)
                 continue
             elif rutf8._invalid_byte_3_of_4(ordch3):
-                r, pos = errorhandler(errors, 'utf8',
-                                     'invalid continuation byte',
-                                     s, pos, pos + 2)
+                r, pos, rettype, s = errorhandler(errors, 'utf-8',
+                                      'invalid continuation byte',
+                                      s, pos, pos+2)
                 result.append(r)
                 continue
             elif rutf8._invalid_byte_4_of_4(ordch4):
-                r, pos = errorhandler(errors, 'utf8',
+                r, pos, rettype, s = errorhandler(errors, 'utf-8',
                                       'invalid continuation byte',
-                                      s, pos, pos + 3)
+                                      s, pos, pos+3)
                 result.append(r)
                 continue
-
             # 11110www 10xxxxxx 10yyyyyy 10zzzzzz -> 000wwwxx xxxxyyyy yyzzzzzz
             result.append(chr(ordch1))
             result.append(chr(ordch2))
@@ -389,7 +537,9 @@ def str_decode_utf8(s, errors, final, errorhandler):
             pos += 4
 
     r = result.build()
-    return r, pos, rutf8.check_utf8(r, True)
+    # XXX can keep track of the resulting length without calling check_utf8
+    # here
+    return r, rutf8.check_utf8(r, True), pos
 
 hexdigits = "0123456789ABCDEFabcdef"
 
@@ -400,9 +550,9 @@ def hexescape(builder, s, pos, digits,
         endinpos = pos
         while endinpos < len(s) and s[endinpos] in hexdigits:
             endinpos += 1
-        res, pos = errorhandler(
+        r, pos, rettype, s = errorhandler(
             errors, encoding, message, s, pos - 2, endinpos)
-        builder.append(res)
+        builder.append(r)
     else:
         try:
             chr = int(s[pos:pos + digits], 16)
@@ -410,9 +560,9 @@ def hexescape(builder, s, pos, digits,
             endinpos = pos
             while s[endinpos] in hexdigits:
                 endinpos += 1
-            res, pos = errorhandler(
+            r, pos, rettype, s = errorhandler(
                 errors, encoding, message, s, pos - 2, endinpos)
-            builder.append(res)
+            builder.append(r)
         else:
             # when we get here, chr is a 32-bit unicode character
             try:
@@ -420,19 +570,19 @@ def hexescape(builder, s, pos, digits,
                 pos += digits
             except rutf8.OutOfRange:
                 message = "illegal Unicode character"
-                res, pos = errorhandler(
+                r, pos, rettype, s = errorhandler(
                     errors, encoding, message, s, pos - 2, pos + digits)
-                builder.append(res)
-    return pos
+                builder.append(r)
+    return pos, s
 
 def str_decode_unicode_escape(s, errors, final, errorhandler, ud_handler):
-    size = len(s)
-    if size == 0:
-        return '', 0, 0
+    if len(s) == 0:
+        return '', 0, 0, None
 
-    builder = rutf8.Utf8StringBuilder(size)
+    builder = rutf8.Utf8StringBuilder(len(s))
     pos = 0
-    while pos < size:
+    first_escape_error_char = None
+    while pos < len(s):
         ch = s[pos]
 
         # Non-escape characters are interpreted as Unicode ordinals
@@ -445,13 +595,13 @@ def str_decode_unicode_escape(s, errors, final, errorhandler, ud_handler):
             continue
 
         # - Escapes
-        if pos + 1 >= size:
+        if pos + 1 >= len(s):
             if not final:
                 break
             message = "\\ at end of string"
-            res, pos = errorhandler(errors, "unicodeescape",
-                                    message, s, pos, size)
-            builder.append(res)
+            r, pos, rettype, s = errorhandler(errors, "unicodeescape",
+                                    message, s, pos - 1, len(s))
+            builder.append(r)
             continue
         pos += 1
 
@@ -482,12 +632,12 @@ def str_decode_unicode_escape(s, errors, final, errorhandler, ud_handler):
             builder.append_char('\a')
         elif '0' <= ch <= '7':
             x = ord(ch) - ord('0')
-            if pos < size:
+            if pos < len(s):
                 ch = s[pos]
                 if '0' <= ch <= '7':
                     pos += 1
                     x = (x << 3) + ord(ch) - ord('0')
-                    if pos < size:
+                    if pos < len(s):
                         ch = s[pos]
                         if '0' <= ch <= '7':
                             pos += 1
@@ -504,7 +654,7 @@ def str_decode_unicode_escape(s, errors, final, errorhandler, ud_handler):
                 pos -= 2
                 break
             message = "truncated \\xXX escape"
-            pos = hexescape(builder, s, pos, digits,
+            pos, s = hexescape(builder, s, pos, digits,
                             "unicodeescape", errorhandler, message, errors)
         # \uXXXX
         elif ch == 'u':
@@ -513,7 +663,7 @@ def str_decode_unicode_escape(s, errors, final, errorhandler, ud_handler):
                 pos -= 2
                 break
             message = "truncated \\uXXXX escape"
-            pos = hexescape(builder, s, pos, digits,
+            pos, s = hexescape(builder, s, pos, digits,
                             "unicodeescape", errorhandler, message, errors)
         #  \UXXXXXXXX
         elif ch == 'U':
@@ -522,27 +672,27 @@ def str_decode_unicode_escape(s, errors, final, errorhandler, ud_handler):
                 pos -= 2
                 break
             message = "truncated \\UXXXXXXXX escape"
-            pos = hexescape(builder, s, pos, digits,
+            pos, s = hexescape(builder, s, pos, digits,
                             "unicodeescape", errorhandler, message, errors)
         # \N{name}
         elif ch == 'N' and ud_handler is not None:
             message = "malformed \\N character escape"
             look = pos
 
-            if look < size and s[look] == '{':
+            if look < len(s) and s[look] == '{':
                 # look for the closing brace
-                while look < size and s[look] != '}':
+                while look < len(s) and s[look] != '}':
                     look += 1
-                if look < size and s[look] == '}':
+                if look < len(s) and s[look] == '}':
                     # found a name.  look it up in the unicode database
                     message = "unknown Unicode character name"
                     name = s[pos + 1:look]
                     code = ud_handler.call(name)
                     if code < 0:
-                        res, pos = errorhandler(
+                        r, pos, rettype, s = errorhandler(
                             errors, "unicodeescape", message,
                             s, pos - 1, look + 1)
-                        builder.append(res)
+                        builder.append(r)
                         continue
                     pos = look + 1
                     builder.append_code(code)
@@ -550,21 +700,23 @@ def str_decode_unicode_escape(s, errors, final, errorhandler, ud_handler):
                     if not final:
                         pos -= 2
                         break
-                    res, pos = errorhandler(errors, "unicodeescape",
+                    r, pos, rettype, s = errorhandler(errors, "unicodeescape",
                                             message, s, pos - 1, look + 1)
-                    builder.append(res)
+                    builder.append(r)
             else:
                 if not final:
                     pos -= 2
                     break
-                res, pos = errorhandler(errors, "unicodeescape",
+                r, pos, rettype, s = errorhandler(errors, "unicodeescape",
+
                                         message, s, pos - 1, look + 1)
-                builder.append(res)
+                builder.append(r)
         else:
             builder.append_char('\\')
             builder.append_code(ord(ch))
+            first_escape_error_char = ch
 
-    return builder.build(), pos, builder.getlength()
+    return builder.build(), builder.getlength(), pos, first_escape_error_char
 
 def wcharpsize2utf8(space, wcharp, size):
     """Safe version of rffi.wcharpsize2utf8.
@@ -572,10 +724,15 @@ def wcharpsize2utf8(space, wcharp, size):
     Raises app-level ValueError if any wchar value is outside the valid
     codepoint range.
     """
-    try:
-        return rffi.wcharpsize2utf8(wcharp, size)
-    except rutf8.OutOfRange as e:
-        raise wrap_unicode_out_of_range_error(space, e)
+    if _WIN32:
+        import pypy.interpreter.unicodehelper_win32 as win32
+        # wcharp is actually utf16
+        return win32._unibuf_to_utf8(wcharp, size)
+    else:
+        try:
+            return rffi.wcharpsize2utf8(wcharp, size)
+        except rutf8.OutOfRange as e:
+            raise wrap_unicode_out_of_range_error(space, e)
 
 def wrap_unicode_out_of_range_error(space, e):
     raise oefmt(space.w_ValueError,
@@ -587,49 +744,51 @@ def wrap_unicode_out_of_range_error(space, e):
 
 def str_decode_raw_unicode_escape(s, errors, final=False,
                                   errorhandler=None):
-    size = len(s)
-    if size == 0:
+    if len(s) == 0:
         return '', 0, 0
 
-    builder = rutf8.Utf8StringBuilder(size)
+    builder = rutf8.Utf8StringBuilder(len(s))
     pos = 0
-    while pos < size:
+    while pos < len(s):
         ch = s[pos]
+        pos += 1
 
         # Non-escape characters are interpreted as Unicode ordinals
         if ch != '\\':
             builder.append_code(ord(ch))
-            pos += 1
             continue
 
-        # \u-escapes are only interpreted iff the number of leading
-        # backslashes is odd
-        bs = pos
-        while pos < size:
-            pos += 1
-            if pos == size or s[pos] != '\\':
-                break
-            builder.append_char('\\')
-
-        # we have a backslash at the end of the string, stop here
-        if pos >= size:
-            builder.append_char('\\')
+        if pos == len(s):
+            if final:
+                # we have a backslash at the end of the string, stop here
+                builder.append_char('\\')
+            else:
+                pos -= 1
             break
-
-        if ((pos - bs) & 1 == 0 or pos >= size or
-                (s[pos] != 'u' and s[pos] != 'U')):
+        ch = s[pos]
+        if ch == "\\":
             builder.append_char('\\')
-            builder.append_code(ord(s[pos]))
             pos += 1
             continue
-
-        digits = 4 if s[pos] == 'u' else 8
-        message = "truncated \\uXXXX"
+        if s[pos] == 'u':
+            digits = 4
+            message = "truncated \\uXXXX escape"
+        elif s[pos] == 'U':
+            digits = 8
+            message = "truncated \\UXXXXXXXX escape"
+        else:
+            builder.append_char('\\')
+            builder.append_char(ch)
+            pos += 1
+            continue
         pos += 1
-        pos = hexescape(builder, s, pos, digits,
+        if pos + digits > len(s) and not final:
+            pos -= 2
+            break
+        pos, s = hexescape(builder, s, pos, digits,
                            "rawunicodeescape", errorhandler, message, errors)
 
-    return builder.build(), pos, builder.getlength()
+    return builder.build(), builder.getlength(), pos
 
 _utf8_encode_unicode_escape = rutf8.make_utf8_escape_function()
 
@@ -649,7 +808,7 @@ def raw_unicode_escape_helper(result, char):
     for i in range(zeros-1, -1, -1):
         result.append(TABLE[(char >> (4 * i)) & 0x0f])
 
-def utf8_encode_raw_unicode_escape(s, errors, errorhandler):
+def utf8_encode_raw_unicode_escape(s, errors, errorhandler, allow_surrogates=False):
     # errorhandler is not used: this function cannot cause Unicode errors
     size = len(s)
     if size == 0:
@@ -668,7 +827,7 @@ def utf8_encode_raw_unicode_escape(s, errors, errorhandler):
     return result.build()
 
 
-def utf8_encode_unicode_escape(s, errors, errorhandler):
+def utf8_encode_unicode_escape(s, errors, errorhandler, allow_surrogates=False):
     return _utf8_encode_unicode_escape(s)
 
 # ____________________________________________________________
@@ -762,8 +921,7 @@ def _utf7_ENCODE_CHAR(result, oc, base64bits, base64buffer):
 
 def str_decode_utf_7(s, errors, final=False,
                      errorhandler=None):
-    size = len(s)
-    if size == 0:
+    if len(s) == 0:
         return '', 0, 0
 
     inShift = False
@@ -772,11 +930,11 @@ def str_decode_utf_7(s, errors, final=False,
     surrogate = 0
     outsize = 0
 
-    result = StringBuilder(size)
+    result = StringBuilder(len(s))
     pos = 0
     shiftOutStartPos = 0
     startinpos = 0
-    while pos < size:
+    while pos < len(s):
         ch = s[pos]
 
         if inShift: # in a base-64 section
@@ -825,22 +983,22 @@ def str_decode_utf_7(s, errors, final=False,
                         # We've seen at least one base-64 character
                         pos += 1
                         msg = "partial character in shift sequence"
-                        res, pos = errorhandler(errors, 'utf7',
+                        r, pos, rettype, s = errorhandler(errors, 'utf7',
                                                 msg, s, pos-1, pos)
-                        reslen = rutf8.check_utf8(res, True)
+                        reslen = rutf8.check_utf8(r, True)
                         outsize += reslen
-                        result.append(res)
+                        result.append(r)
                         continue
                     else:
                         # Some bits remain; they should be zero
                         if base64buffer != 0:
                             pos += 1
                             msg = "non-zero padding bits in shift sequence"
-                            res, pos = errorhandler(errors, 'utf7',
+                            r, pos, rettype, s = errorhandler(errors, 'utf7',
                                                     msg, s, pos-1, pos)
-                            reslen = rutf8.check_utf8(res, True)
+                            reslen = rutf8.check_utf8(r, True)
                             outsize += reslen
-                            result.append(res)
+                            result.append(r)
                             continue
 
                 if surrogate and _utf7_DECODE_DIRECT(ord(ch)):
@@ -856,10 +1014,16 @@ def str_decode_utf_7(s, errors, final=False,
         elif ch == '+':
             startinpos = pos
             pos += 1 # consume '+'
-            if pos < size and s[pos] == '-': # '+-' encodes '+'
+            if pos < len(s) and s[pos] == '-': # '+-' encodes '+'
                 pos += 1
                 result.append('+')
                 outsize += 1
+            elif pos < len(s) and not _utf7_IS_BASE64(ord(s[pos])):
+                msg = "ill-formed sequence"
+                r, pos, rettype, s = errorhandler(errors, 'utf7', msg, s, pos-1, pos+1)
+                reslen = rutf8.check_utf8(r, True)
+                outsize += reslen
+                result.append(r)
             else: # begin base64-encoded section
                 inShift = 1
                 surrogate = 0
@@ -875,33 +1039,35 @@ def str_decode_utf_7(s, errors, final=False,
             startinpos = pos
             pos += 1
             msg = "unexpected special character"
-            res, pos = errorhandler(errors, 'utf7', msg, s, pos-1, pos)
-            reslen = rutf8.check_utf8(res, True)
+            r, pos, rettype, s = errorhandler(errors, 'utf7', msg, s, pos-1, pos)
+            reslen = rutf8.check_utf8(r, True)
             outsize += reslen
-            result.append(res)
+            result.append(r)
 
     # end of string
     final_length = result.getlength()
+    final_size = len(s)
     if inShift and final: # in shift sequence, no more to follow
-        # if we're in an inconsistent state, that's an error
         inShift = 0
         if (surrogate or
             base64bits >= 6 or
             (base64bits > 0 and base64buffer != 0)):
+            # if we're in an inconsistent state, that's an error
             msg = "unterminated shift sequence"
-            res, pos = errorhandler(errors, 'utf7', msg, s, shiftOutStartPos, pos)
-            reslen = rutf8.check_utf8(res, True)
+            r, pos, rettype, s = errorhandler(errors, 'utf7', msg, s, shiftOutStartPos, pos)
+            reslen = rutf8.check_utf8(r, True)
             outsize += reslen
-            result.append(res)
+            result.append(r)
             final_length = result.getlength()
     elif inShift:
-        pos = startinpos
+        final_size = startinpos
         final_length = shiftOutStartPos # back off output
 
     assert final_length >= 0
-    return result.build()[:final_length], pos, outsize
+    return result.build()[:final_length], outsize, final_size
 
-def utf8_encode_utf_7(s, errors, errorhandler):
+def utf8_encode_utf_7(s, errors, errorhandler, allow_surrogates=False):
+    # only uses s, other arguments are ignored
     size = len(s)
     if size == 0:
         return ''
@@ -956,8 +1122,8 @@ def utf8_encode_utf_7(s, errors, errorhandler):
 def decode_utf8sp(space, string):
     # Surrogate-preserving utf-8 decoding.  Assuming there is no
     # encoding error, it should always be reversible, and the reverse is
-    # encode_utf8sp().
-    return str_decode_utf8(string, "string", True, _decode_never_raise,
+    # unused encode_utf8sp().
+    return str_decode_utf8(string, "string", True, decode_never_raise,
                            allow_surrogates=True)
 
 # ____________________________________________________________
@@ -969,27 +1135,23 @@ assert BYTEORDER2 in ('le', 'be')
 
 def str_decode_utf_16(s, errors, final=True,
                       errorhandler=None):
-    result, c, lgt, _ = str_decode_utf_16_helper(s, errors, final,
-                                                         errorhandler, "native")
-    return result, c, lgt
+    return str_decode_utf_16_helper(s, errors, final, errorhandler,
+                                    "native")[:3]
 
 def str_decode_utf_16_be(s, errors, final=True,
                         errorhandler=None):
-    result, c, lgt, _ = str_decode_utf_16_helper(s, errors, final,
-                                                         errorhandler, "big")
-    return result, c, lgt
+    return str_decode_utf_16_helper(s, errors, final, errorhandler, "big",
+                                   'utf16-be')[:3]
 
 def str_decode_utf_16_le(s, errors, final=True,
                          errorhandler=None):
-    result, c, lgt, _ = str_decode_utf_16_helper(s, errors, final,
-                                                         errorhandler, "little")
-    return result, c, lgt
+    return str_decode_utf_16_helper(s, errors, final, errorhandler, "little",
+                                    'utf16-le')[:3]
 
 def str_decode_utf_16_helper(s, errors, final=True,
                              errorhandler=None,
                              byteorder="native",
                              public_encoding_name='utf16'):
-    size = len(s)
     bo = 0
 
     if BYTEORDER == 'little':
@@ -1005,7 +1167,7 @@ def str_decode_utf_16_helper(s, errors, final=True,
     #  stream as-is (giving a ZWNBSP character).
     pos = 0
     if byteorder == 'native':
-        if size >= 2:
+        if len(s) >= 2:
             bom = (ord(s[ihi]) << 8) | ord(s[ilo])
             if BYTEORDER == 'little':
                 if bom == 0xFEFF:
@@ -1025,7 +1187,7 @@ def str_decode_utf_16_helper(s, errors, final=True,
         bo = -1
     else:
         bo = 1
-    if size == 0:
+    if len(s) == 0:
         return '', 0, 0, bo
     if bo == -1:
         # force little endian
@@ -1037,15 +1199,14 @@ def str_decode_utf_16_helper(s, errors, final=True,
         ihi = 0
         ilo = 1
 
-    result = StringBuilder(size // 2)
+    result = StringBuilder(len(s) // 2)
 
-    #XXX I think the errors are not correctly handled here
-    while pos < size:
-        # remaining bytes at the end? (size should be even)
+    while pos < len(s):
+        # remaining bytes at the end? (len(s) should be even)
         if len(s) - pos < 2:
             if not final:
                 break
-            r, pos = errorhandler(errors, public_encoding_name,
+            r, pos, rettype, s = errorhandler(errors, public_encoding_name,
                                   "truncated data",
                                   s, pos, len(s))
             result.append(r)
@@ -1056,18 +1217,23 @@ def str_decode_utf_16_helper(s, errors, final=True,
         if ch < 0xD800 or ch > 0xDFFF:
             rutf8.unichr_as_utf8_append(result, ch)
             continue
+        # unexpected low surrogate
+        elif ch >= 0xDC00:
+            r, pos, rettype, s = errorhandler(errors, public_encoding_name,
+                                  "illegal encoding",
+                                  s, pos - 2, pos)
+            result.append(r)
+            continue
         # UTF-16 code pair:
         if len(s) - pos < 2:
             pos -= 2
             if not final:
                 break
             errmsg = "unexpected end of data"
-            r, pos = errorhandler(errors, public_encoding_name,
+            r, pos, rettype, s = errorhandler(errors, public_encoding_name,
                                   errmsg, s, pos, len(s))
             result.append(r)
-            if len(s) - pos < 2:
-                break
-        elif 0xD800 <= ch <= 0xDBFF:
+        else:
             ch2 = (ord(s[pos+ihi]) << 8) | ord(s[pos+ilo])
             pos += 2
             if 0xDC00 <= ch2 <= 0xDFFF:
@@ -1075,18 +1241,13 @@ def str_decode_utf_16_helper(s, errors, final=True,
                 rutf8.unichr_as_utf8_append(result, ch)
                 continue
             else:
-                r, pos = errorhandler(errors, public_encoding_name,
+                r, pos, rettype, s = errorhandler(errors, public_encoding_name,
                                       "illegal UTF-16 surrogate",
                                       s, pos - 4, pos - 2)
                 result.append(r)
-        else:
-            r, pos = errorhandler(errors, public_encoding_name,
-                                  "illegal encoding",
-                                  s, pos - 2, pos)
-            result.append(r)
     r = result.build()
     lgt = rutf8.check_utf8(r, True)
-    return result.build(), pos, lgt, bo
+    return r, lgt, pos, bo
 
 def _STORECHAR(result, CH, byteorder):
     hi = chr(((CH) >> 8) & 0xff)
@@ -1098,52 +1259,59 @@ def _STORECHAR(result, CH, byteorder):
         result.append(hi)
         result.append(lo)
 
-def unicode_encode_utf_16_helper(s, errors,
+def utf8_encode_utf_16_helper(s, errors,
                                  errorhandler=None,
                                  allow_surrogates=True,
                                  byteorder='little',
                                  public_encoding_name='utf16'):
-    size = len(s)
-    if size == 0:
+    if len(s) == 0:
         if byteorder == 'native':
             result = StringBuilder(2)
             _STORECHAR(result, 0xFEFF, BYTEORDER)
             return result.build()
         return ""
 
-    result = StringBuilder(size * 2 + 2)
+    result = StringBuilder(len(s) * 2 + 2)
     if byteorder == 'native':
         _STORECHAR(result, 0xFEFF, BYTEORDER)
         byteorder = BYTEORDER
 
     pos = 0
     index = 0
-    while pos < size:
-        ch = rutf8.codepoint_at_pos(s, pos)
-
-        if ch < 0xD800:
-            _STORECHAR(result, ch, byteorder)
-        elif ch >= 0x10000:
-            _STORECHAR(result, 0xD800 | ((ch-0x10000) >> 10), byteorder)
-            _STORECHAR(result, 0xDC00 | ((ch-0x10000) & 0x3FF), byteorder)
-        elif ch >= 0xE000 or allow_surrogates:
-            _STORECHAR(result, ch, byteorder)
+    while pos < len(s):
+        cp = rutf8.codepoint_at_pos(s, pos)
+        if cp < 0xD800:
+            _STORECHAR(result, cp, byteorder)
+        elif cp >= 0x10000:
+            _STORECHAR(result, 0xD800 | ((cp-0x10000) >> 10), byteorder)
+            _STORECHAR(result, 0xDC00 | ((cp-0x10000) & 0x3FF), byteorder)
+        elif cp >= 0xE000 or allow_surrogates:
+            _STORECHAR(result, cp, byteorder)
         else:
-            res_8, newindex = errorhandler(
+            r, newindex, rettype, s = errorhandler(
                 errors, public_encoding_name, 'surrogates not allowed',
-                s, pos, pos+1)
-            for cp in rutf8.Utf8StringIterator(res_8):
-                if cp < 0xD800:
-                    _STORECHAR(result, cp, byteorder)
-                else:
-                    errorhandler('strict', public_encoding_name,
-                                 'surrogates not allowed',
-                                 s, pos, pos+1)
+                s, index, index+1)
+            if rettype == 'u':
+                for cp in rutf8.Utf8StringIterator(r):
+                    if cp < 0xD800 or allow_surrogates:
+                        _STORECHAR(result, cp, byteorder)
+                    else:
+                        errorhandler('strict', public_encoding_name,
+                                     'surrogates not allowed',
+                                     s, index, index+1)
+            else:
+                for ch in r:
+                    cp = ord(ch)
+                    if cp < 0xD800 or allow_surrogates:
+                        _STORECHAR(result, cp, byteorder)
+                    else:
+                        errorhandler('strict', public_encoding_name,
+                                     'surrogates not allowed',
+                                 s, index, index+1)
             if index != newindex:  # Should be uncommon
                 index = newindex
                 pos = rutf8._pos_at_index(s, newindex)
             continue
-
         pos = rutf8.next_codepoint_pos(s, pos)
         index += 1
 
@@ -1151,42 +1319,45 @@ def unicode_encode_utf_16_helper(s, errors,
 
 def utf8_encode_utf_16(s, errors,
                           errorhandler=None,
-                          allow_surrogates=True):
-    return unicode_encode_utf_16_helper(s, errors, errorhandler,
-                                        allow_surrogates, "native")
+                          allow_surrogates=False):
+    return utf8_encode_utf_16_helper(s, errors, errorhandler,
+                                        allow_surrogates, "native",
+                                        'utf-16-' + BYTEORDER2)
 
 def utf8_encode_utf_16_be(s, errors,
                              errorhandler=None,
-                             allow_surrogates=True):
-    return unicode_encode_utf_16_helper(s, errors, errorhandler,
-                                        allow_surrogates, "big")
+                             allow_surrogates=False):
+    return utf8_encode_utf_16_helper(s, errors, errorhandler,
+                                        allow_surrogates, "big",
+                                        'utf-16-be')
 
 def utf8_encode_utf_16_le(s, errors,
                              errorhandler=None,
-                             allow_surrogates=True):
-    return unicode_encode_utf_16_helper(s, errors, errorhandler,
-                                        allow_surrogates, "little")
+                             allow_surrogates=False):
+    return utf8_encode_utf_16_helper(s, errors, errorhandler,
+                                        allow_surrogates, "little",
+                                        'utf-16-le')
 
 # ____________________________________________________________
 # utf-32
 
 def str_decode_utf_32(s, errors, final=True,
                       errorhandler=None):
-    result, c, lgt, _ = str_decode_utf_32_helper(s, errors, final,
-                                                         errorhandler, "native")
-    return result, c, lgt
+    return str_decode_utf_32_helper(
+        s, errors, final, errorhandler, "native", 'utf-32-' + BYTEORDER2,
+        allow_surrogates=False)[:3]
 
 def str_decode_utf_32_be(s, errors, final=True,
                          errorhandler=None):
-    result, c, lgt, _ = str_decode_utf_32_helper(s, errors, final,
-                                                         errorhandler, "big")
-    return result, c, lgt
+    return str_decode_utf_32_helper(
+        s, errors, final, errorhandler, "big", 'utf-32-be',
+        allow_surrogates=False)[:3]
 
 def str_decode_utf_32_le(s, errors, final=True,
                          errorhandler=None):
-    result, c, lgt, _ = str_decode_utf_32_helper(s, errors, final,
-                                                         errorhandler, "little")
-    return result, c, lgt
+    return str_decode_utf_32_helper(
+        s, errors, final, errorhandler, "little", 'utf-32-le',
+        allow_surrogates=False)[:3]
 
 BOM32_DIRECT  = intmask(0x0000FEFF)
 BOM32_REVERSE = intmask(0xFFFE0000)
@@ -1198,7 +1369,6 @@ def str_decode_utf_32_helper(s, errors, final,
                              allow_surrogates=True):
     assert errorhandler is not None
     bo = 0
-    size = len(s)
 
     if BYTEORDER == 'little':
         iorder0, iorder1, iorder2, iorder3 = 0, 1, 2, 3
@@ -1211,7 +1381,7 @@ def str_decode_utf_32_helper(s, errors, final,
     #  stream as-is (giving a ZWNBSP character).
     pos = 0
     if byteorder == 'native':
-        if size >= 4:
+        if len(s) >= 4:
             bom = intmask(
                 (ord(s[iorder3]) << 24) | (ord(s[iorder2]) << 16) |
                 (ord(s[iorder1]) << 8) | ord(s[iorder0]))
@@ -1233,7 +1403,7 @@ def str_decode_utf_32_helper(s, errors, final,
         bo = -1
     else:
         bo = 1
-    if size == 0:
+    if len(s) == 0:
         return '', 0, 0, bo
     if bo == -1:
         # force little endian
@@ -1242,14 +1412,14 @@ def str_decode_utf_32_helper(s, errors, final,
         # force big endian
         iorder0, iorder1, iorder2, iorder3 = 3, 2, 1, 0
 
-    result = StringBuilder(size // 4)
+    result = StringBuilder(len(s) // 4)
 
-    while pos < size:
-        # remaining bytes at the end? (size should be divisible by 4)
+    while pos < len(s):
+        # remaining bytes at the end? (len(s) should be divisible by 4)
         if len(s) - pos < 4:
             if not final:
                 break
-            r, pos = errorhandler(errors, public_encoding_name,
+            r, pos, rettype, s = errorhandler(errors, public_encoding_name,
                                   "truncated data",
                                   s, pos, len(s))
             result.append(r)
@@ -1259,14 +1429,14 @@ def str_decode_utf_32_helper(s, errors, final,
         ch = ((ord(s[pos + iorder3]) << 24) | (ord(s[pos + iorder2]) << 16) |
               (ord(s[pos + iorder1]) << 8)  | ord(s[pos + iorder0]))
         if not allow_surrogates and 0xD800 <= ch <= 0xDFFF:
-            r, pos = errorhandler(errors, public_encoding_name,
+            r, pos, rettype, obj = errorhandler(errors, public_encoding_name,
                                   "code point in surrogate code point "
                                   "range(0xd800, 0xe000)",
                                   s, pos, pos + 4)
             result.append(r)
             continue
         elif r_uint(ch) >= 0x110000:
-            r, pos = errorhandler(errors, public_encoding_name,
+            r, pos, rettype, s = errorhandler(errors, public_encoding_name,
                                   "codepoint not in range(0x110000)",
                                   s, pos, len(s))
             result.append(r)
@@ -1276,7 +1446,7 @@ def str_decode_utf_32_helper(s, errors, final,
         pos += 4
     r = result.build()
     lgt = rutf8.check_utf8(r, True)
-    return r, pos, lgt, bo
+    return r, lgt, pos, bo
 
 def _STORECHAR32(result, CH, byteorder):
     c0 = chr(((CH) >> 24) & 0xff)
@@ -1294,131 +1464,77 @@ def _STORECHAR32(result, CH, byteorder):
         result.append(c2)
         result.append(c3)
 
-def unicode_encode_utf_32_helper(s, errors,
+def utf8_encode_utf_32_helper(s, errors,
                                  errorhandler=None,
                                  allow_surrogates=True,
                                  byteorder='little',
                                  public_encoding_name='utf32'):
-    size = len(s)
-    if size == 0:
+    # s is utf8
+    if len(s) == 0:
         if byteorder == 'native':
             result = StringBuilder(4)
             _STORECHAR32(result, 0xFEFF, BYTEORDER)
             return result.build()
         return ""
 
-    result = StringBuilder(size * 4 + 4)
+    result = StringBuilder(len(s) * 4 + 4)
     if byteorder == 'native':
         _STORECHAR32(result, 0xFEFF, BYTEORDER)
         byteorder = BYTEORDER
 
     pos = 0
     index = 0
-    while pos < size:
+    while pos < len(s):
         ch = rutf8.codepoint_at_pos(s, pos)
-        pos = rutf8.next_codepoint_pos(s, pos)
         if not allow_surrogates and 0xD800 <= ch < 0xE000:
-            res_8, newindex = errorhandler(
+            r, newindex, rettype, obj = errorhandler(
                 errors, public_encoding_name, 'surrogates not allowed',
-                s, pos - 1, pos)
-            for ch in rutf8.Utf8StringIterator(res_8):
-                if ch < 0xD800:
-                    _STORECHAR32(result, ch, byteorder)
-                else:
-                    errorhandler(
-                        'strict', public_encoding_name, 'surrogates not allowed',
-                        s, pos - 1, pos)
+                s, index, index+1)
+            if rettype == 'u':
+                for ch in rutf8.Utf8StringIterator(r):
+                    if ch < 0xD800:
+                        _STORECHAR32(result, ch, byteorder)
+                    else:
+                        errorhandler(
+                            'strict', public_encoding_name, 'surrogates not allowed',
+                            s, index, index+1)
+            else:
+                for ch in r:
+                    cp = ord(ch)
+                    if cp < 0xD800:
+                        _STORECHAR32(result, cp, byteorder)
+                    else:
+                        errorhandler(
+                            'strict', public_encoding_name, 'surrogates not allowed',
+                            s, index, index+1)
+            s = obj
             if index != newindex:  # Should be uncommon
                 index = newindex
                 pos = rutf8._pos_at_index(s, newindex)
             continue
+        pos = rutf8.next_codepoint_pos(s, pos)
         _STORECHAR32(result, ch, byteorder)
         index += 1
 
     return result.build()
 
 def utf8_encode_utf_32(s, errors,
-                          errorhandler=None, allow_surrogates=True):
-    return unicode_encode_utf_32_helper(s, errors, errorhandler,
-                                        allow_surrogates, "native")
+                       errorhandler=None, allow_surrogates=True):
+    return utf8_encode_utf_32_helper(s, errors, errorhandler,
+                                        allow_surrogates, "native",
+                                        'utf-32-' + BYTEORDER2)
 
 def utf8_encode_utf_32_be(s, errors,
-                             errorhandler=None, allow_surrogates=True):
-    return unicode_encode_utf_32_helper(s, errors, errorhandler,
-                                        allow_surrogates, "big")
+                          errorhandler=None, allow_surrogates=True):
+    return utf8_encode_utf_32_helper(s, errors, errorhandler,
+                                        allow_surrogates, "big",
+                                        'utf-32-be')
 
 def utf8_encode_utf_32_le(s, errors,
-                             errorhandler=None, allow_surrogates=True):
-    return unicode_encode_utf_32_helper(s, errors, errorhandler,
-                                        allow_surrogates, "little")
-# ____________________________________________________________
-# unicode-internal
-
-def str_decode_unicode_internal(s, errors, final=False,
-                                errorhandler=None):
-    size = len(s)
-    if size == 0:
-        return '', 0, 0
-
-    unicode_bytes = 4
-    if BYTEORDER == "little":
-        start = 0
-        stop = unicode_bytes
-        step = 1
-    else:
-        start = unicode_bytes - 1
-        stop = -1
-        step = -1
-
-    result = StringBuilder(size)
-    pos = 0
-    while pos < size:
-        if pos > size - unicode_bytes:
-            res, pos = errorhandler(errors, "unicode_internal",
-                                    "truncated input",
-                                    s, pos, size)
-            result.append(res)
-            continue
-        t = r_uint(0)
-        h = 0
-        for j in range(start, stop, step):
-            t += r_uint(ord(s[pos + j])) << (h*8)
-            h += 1
-        if t > 0x10ffff:
-            res, pos = errorhandler(errors, "unicode_internal",
-                                    "unichr(%d) not in range" % (t,),
-                                    s, pos, pos + unicode_bytes)
-            result.append(res)
-            continue
-        rutf8.unichr_as_utf8_append(result, intmask(t), allow_surrogates=True)
-        pos += unicode_bytes
-    r = result.build()
-    lgt = rutf8.check_utf8(r, True)
-    return r, pos, lgt
-
-def utf8_encode_unicode_internal(s, errors, errorhandler):
-    size = len(s)
-    if size == 0:
-        return ''
-
-    result = StringBuilder(size * 4)
-    pos = 0
-    while pos < size:
-        oc = rutf8.codepoint_at_pos(s, pos)
-        if BYTEORDER == "little":
-            result.append(chr(oc       & 0xFF))
-            result.append(chr(oc >>  8 & 0xFF))
-            result.append(chr(oc >> 16 & 0xFF))
-            result.append(chr(oc >> 24 & 0xFF))
-        else:
-            result.append(chr(oc >> 24 & 0xFF))
-            result.append(chr(oc >> 16 & 0xFF))
-            result.append(chr(oc >>  8 & 0xFF))
-            result.append(chr(oc       & 0xFF))
-        pos = rutf8.next_codepoint_pos(s, pos)
-
-    return result.build()
-
+                          errorhandler=None, allow_surrogates=True):
+    return utf8_encode_utf_32_helper(s, errors, errorhandler,
+                                        allow_surrogates, "little",
+                                        'utf-32-le')
 # ____________________________________________________________
 # Charmap
 
@@ -1433,18 +1549,17 @@ def str_decode_charmap(s, errors, final=False,
     if mapping is None:
         return str_decode_latin_1(s, errors, final=final,
                                   errorhandler=errorhandler)
-    size = len(s)
-    if size == 0:
+    if len(s) == 0:
         return '', 0, 0
 
     pos = 0
-    result = StringBuilder(size)
-    while pos < size:
+    result = StringBuilder(len(s))
+    while pos < len(s):
         ch = s[pos]
 
         c = mapping.get(ord(ch), ERROR_CHAR)
         if c == ERROR_CHAR:
-            r, pos = errorhandler(errors, "charmap",
+            r, pos, rettype, s = errorhandler(errors, "charmap",
                                   "character maps to <undefined>",
                                   s,  pos, pos + 1)
             result.append(r)
@@ -1452,20 +1567,18 @@ def str_decode_charmap(s, errors, final=False,
         result.append(c)
         pos += 1
     r = result.build()
-    lgt = rutf8.check_utf8(r, True)
-    return r, pos, lgt
+    lgt = rutf8.codepoints_in_utf8(r)
+    return r, lgt, pos
 
-def utf8_encode_charmap(s, errors, errorhandler=None, mapping=None):
-    size = len(s)
+def utf8_encode_charmap(s, errors, errorhandler=None, mapping=None, allow_surrogates=False):
     if mapping is None:
         return utf8_encode_latin_1(s, errors, errorhandler=errorhandler)
-
-    if size == 0:
+    if len(s) == 0:
         return ''
-    result = StringBuilder(size)
+    result = StringBuilder(len(s))
     pos = 0
     index = 0
-    while pos < size:
+    while pos < len(s):
         ch = rutf8.codepoint_at_pos(s, pos)
         c = mapping.get(ch, '')
         if len(c) == 0:
@@ -1473,20 +1586,25 @@ def utf8_encode_charmap(s, errors, errorhandler=None, mapping=None):
             startindex = index
             pos = rutf8.next_codepoint_pos(s, pos)
             index += 1
-            while (pos < size and
+            while (pos < len(s) and
                    mapping.get(rutf8.codepoint_at_pos(s, pos), '') == ''):
                 pos = rutf8.next_codepoint_pos(s, pos)
                 index += 1
-            res_8, newindex = errorhandler(errors, "charmap",
+            r, newindex, rettype, obj = errorhandler(errors, "charmap",
                                    "character maps to <undefined>",
                                    s, startindex, index)
-            for cp2 in rutf8.Utf8StringIterator(res_8):
-                ch2 = mapping.get(cp2, '')
-                if not ch2:
-                    errorhandler(
-                        "strict", "charmap", "character maps to <undefined>",
-                        s,  startindex, index)
-                result.append(ch2)
+            if rettype == 'u':
+                for cp2 in rutf8.Utf8StringIterator(r):
+                    ch2 = mapping.get(cp2, '')
+                    if not ch2:
+                        errorhandler(
+                            "strict", "charmap", "character maps to <undefined>",
+                            s,  startindex, index)
+                    result.append(ch2)
+            else:
+                for ch in r:
+                    result.append(ch)
+            s = obj
             if index != newindex:  # Should be uncommon
                 index = newindex
                 pos = rutf8._pos_at_index(s, newindex)
@@ -1498,7 +1616,7 @@ def utf8_encode_charmap(s, errors, errorhandler=None, mapping=None):
 
 # ____________________________________________________________
 # Decimal Encoder
-def unicode_encode_decimal(s, errors, errorhandler=None):
+def unicode_encode_decimal(s, errors, errorhandler=None, allow_surrogates=False):
     """Converts whitespace to ' ', decimal characters to their
     corresponding ASCII digit and all other Latin-1 characters except
     \0 as-is. Characters outside this range (Unicode ordinals 1-256)
@@ -1545,7 +1663,7 @@ def unicode_encode_decimal(s, errors, errorhandler=None):
             i += 1
         end_index = i
         msg = "invalid decimal Unicode string"
-        r, pos = errorhandler(
+        r, pos, retype, obj = errorhandler(
             errors, 'decimal', msg, s, start_index, end_index)
         for ch in rutf8.Utf8StringIterator(r):
             if unicodedb.isspace(ch):

@@ -11,7 +11,10 @@ import os
 # Bumped to 10.9 2021-11-22 to match CPython,
 # see https://github.com/python/cpython/blob/42205ee51
 #
-DARWIN_VERSION_MIN = '-mmacosx-version-min=10.9'
+# Keep in sync with MACOSX_DEPLOYMENT_TARGET, for pypy see
+# lib_pypy/_sysconfigdata.py
+#
+DARWIN_VERSION_MIN = '-mmacosx-version-min=10.7'
 
 class Darwin(posix.BasePosix):
     name = "darwin"

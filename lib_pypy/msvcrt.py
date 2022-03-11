@@ -11,11 +11,15 @@ still useful routines.
 
 import sys
 if sys.platform != 'win32':
-    raise ImportError("The 'msvcrt' module is only available on Windows")
+    raise ModuleNotFoundError("The 'msvcrt' module is only available on Windows", name="msvcrt")
 
 import _rawffi
-from _pypy_winbase_cffi import ffi as _ffi
+if sys.maxsize > 2 ** 31:
+    from _pypy_winbase_cffi64 import ffi as _ffi
+else:
+    from _pypy_winbase_cffi import ffi as _ffi
 _lib = _ffi.dlopen(_rawffi.get_libc().name)
+_kernel32 = _ffi.dlopen('kernel32')
 
 import errno
 
@@ -116,3 +120,9 @@ def ungetch(ch):
 def ungetwch(ch):
     if _lib._ungetwch(ord(ch)) == -1:   # EOF
         _ioerr()
+
+SetErrorMode = _kernel32.SetErrorMode
+SEM_FAILCRITICALERRORS     = _lib.SEM_FAILCRITICALERRORS
+SEM_NOGPFAULTERRORBOX      = _lib.SEM_NOGPFAULTERRORBOX
+SEM_NOALIGNMENTFAULTEXCEPT = _lib.SEM_NOALIGNMENTFAULTEXCEPT
+SEM_NOOPENFILEERRORBOX     = _lib.SEM_NOOPENFILEERRORBOX

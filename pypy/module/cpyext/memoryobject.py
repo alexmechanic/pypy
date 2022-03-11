@@ -1,3 +1,4 @@
+from pypy.interpreter.error import oefmt
 from pypy.module.cpyext.api import (
     cpython_api, CANNOT_FAIL, Py_MAX_NDIMS, build_type_checkers,
     Py_ssize_tP, cts, parse_dir, bootstrap_function, Py_bufferP, slot_function,
@@ -44,9 +45,9 @@ def memory_attach(space, py_obj, w_obj, w_userdata=None):
     fill_Py_buffer(space, w_obj.view, view)
     try:
         view.c_buf = rffi.cast(rffi.VOIDP, w_obj.view.get_raw_address())
-        # not used in PyPy to keep something alive,
-        # but some c-extensions check the type without checking for NULL
-        view.c_obj = make_ref(space, space.w_None)
+        # In CPython, this is used to keep w_obj alive. We don't need that,
+        # but do it anyway for compatibility when checking mview.obj
+        view.c_obj = make_ref(space, w_obj)
         rffi.setintfield(view, 'c_readonly',
                          rffi.cast(rffi.INT_real, w_obj.view.readonly))
     except ValueError:
@@ -185,12 +186,29 @@ def PyBuffer_IsContiguous(space, view, fort):
 def PyMemoryView_FromObject(space, w_obj):
     return space.call_method(space.builtin, "memoryview", w_obj)
 
+@cts.decl("""PyObject *
+    PyMemoryView_FromMemory(char *mem, Py_ssize_t size, int flags)""")
+def PyMemoryView_FromMemory(space, mem, size, flags):
+    """Expose a raw memory area as a view of contiguous bytes. flags can be
+    PyBUF_READ or PyBUF_WRITE. view->format is set to "B" (unsigned bytes).
+    The memoryview has complete buffer information.
+    """
+    readonly = int(widen(flags) == PyBUF_WRITE)
+    view = CPyBuffer(space, cts.cast('void*', mem), size, None,
+            readonly=readonly)
+    w_mview = W_MemoryView(view)
+    return w_mview
+
 @cpython_api([Py_bufferP], PyObject, result_is_ll=True)
 def PyMemoryView_FromBuffer(space, view):
-    """Create a memoryview object wrapping the given buffer-info structure view.
-    The memoryview object then owns the buffer, which means you shouldn't
-    try to release it yourself: it will be released on deallocation of the
-    memoryview object."""
+    """Create a memoryview object wrapping the given buffer structure view.
+    The memoryview object then owns the buffer represented by view, which
+    means you shouldn't try to call PyBuffer_Release() yourself: it
+    will be done on deallocation of the memoryview object."""
+    if not view.c_buf:
+        raise oefmt(space.w_ValueError,
+            "PyMemoryView_FromBuffer(): info->buf must not be NULL")
+
     # XXX this should allocate a PyMemoryViewObject and
     # copy view into obj.c_view, without creating a new view.c_obj
     typedescr = get_typedescr(W_MemoryView.typedef)
@@ -199,7 +217,8 @@ def PyMemoryView_FromBuffer(space, view):
     py_mem = rffi.cast(PyMemoryViewObject, py_obj)
     mview = py_mem.c_view
     mview.c_buf = view.c_buf
-    mview.c_obj = view.c_obj
+    # like CPython, do not take a reference to the object
+    mview.c_obj = rffi.cast(PyObject, 0)
     mview.c_len = view.c_len
     mview.c_itemsize = view.c_itemsize
     mview.c_readonly = view.c_readonly

@@ -8,11 +8,17 @@ from pypy.module.thread.error import wrap_thread_error
 from pypy.interpreter.baseobjspace import W_Root
 from pypy.interpreter.gateway import interp2app, unwrap_spec
 from pypy.interpreter.typedef import TypeDef, make_weakref_descr
-from pypy.interpreter.error import OperationError, oefmt
+from pypy.interpreter.error import oefmt
 from rpython.rlib.rarithmetic import r_longlong, ovfcheck, ovfcheck_float_to_longlong
 
+# Force the declaration of the type 'thread.LockType' for RPython
+#import pypy.module.thread.rpython.exttable
+
+LONGLONG_MAX = r_longlong(2 ** (r_longlong.BITS - 1) - 1)
+TIMEOUT_MAX = LONGLONG_MAX
 
 RPY_LOCK_FAILURE, RPY_LOCK_ACQUIRED, RPY_LOCK_INTR = range(3)
+
 
 def parse_acquire_args(space, blocking, timeout):
     if not blocking and timeout != -1.0:
@@ -53,15 +59,9 @@ def acquire_timed(space, lock, microseconds):
             break
     return result
 
-def try_release(space, lock):
-    try:
-        lock.release()
-    except rthread.error:
-        raise wrap_thread_error(space, "release unlocked lock")
-
 
 class Lock(W_Root):
-    "A box around an interp-level lock object."
+    "A wrappable box around an interp-level lock object."
 
     _immutable_fields_ = ["lock"]
 
@@ -72,24 +72,9 @@ class Lock(W_Root):
         except rthread.error:
             raise wrap_thread_error(space, "out of resources")
 
-    @unwrap_spec(blocking=int)
-    def descr_lock_acquire(self, space, blocking=1):
-        """Lock the lock.  With the default argument of True, this blocks
-if the lock is already locked (even by the same thread), waiting for
-another thread to release the lock, and returns True once the lock is
-acquired.  With an argument of False, this will always return immediately
-and the return value reflects whether the lock is acquired.
-The blocking operation is not interruptible."""
-        mylock = self.lock
-        result = mylock.acquire(bool(blocking))
-        return space.newbool(result)
-
     @unwrap_spec(blocking=int, timeout=float)
-    def descr_lock_py3k_acquire(self, space, blocking=1, timeout=-1.0):
-        """(Backport of a Python 3 API for PyPy.  This version takes
-a timeout argument and handles signals, like Ctrl-C.)
-
-Lock the lock.  Without argument, this blocks if the lock is already
+    def descr_lock_acquire(self, space, blocking=1, timeout=-1.0):
+        """Lock the lock.  Without argument, this blocks if the lock is already
 locked (even by the same thread), waiting for another thread to release
 the lock, and return None once the lock is acquired.
 With an argument, this will only block if the argument is true,
@@ -103,15 +88,22 @@ The blocking operation is interruptible."""
         """Release the lock, allowing another thread that is blocked waiting for
 the lock to acquire the lock.  The lock must be in the locked state,
 but it needn't be locked by the same thread that unlocks it."""
-        try_release(space, self.lock)
+        try:
+            self.lock.release()
+        except rthread.error:
+            raise oefmt(space.w_RuntimeError,
+                        "cannot release un-acquired lock")
+
+    def _is_locked(self):
+        if self.lock.acquire(False):
+            self.lock.release()
+            return False
+        else:
+            return True
 
     def descr_lock_locked(self, space):
         """Return whether the lock is in the locked state."""
-        if self.lock.acquire(False):
-            self.lock.release()
-            return space.w_False
-        else:
-            return space.w_True
+        return space.newbool(self._is_locked())
 
     def descr__enter__(self, space):
         self.descr_lock_acquire(space)
@@ -127,16 +119,22 @@ but it needn't be locked by the same thread that unlocks it."""
     def __exit__(self, *args):
         self.descr_lock_release(self.space)
 
-descr_acquire = interp2app(Lock.descr_lock_acquire)
-descr_release = interp2app(Lock.descr_lock_release)
-descr_locked  = interp2app(Lock.descr_lock_locked)
-descr__enter__ = interp2app(Lock.descr__enter__)
-descr__exit__ = interp2app(Lock.descr__exit__)
-descr_py3k_acquire = interp2app(Lock.descr_lock_py3k_acquire)
+    def descr__repr__(self, space):
+        classname = space.getfulltypename(self)
+        if self._is_locked():
+            locked = "locked"
+        else:
+            locked = "unlocked"
+        return self.getrepr(space, '%s %s object' % (locked, classname))
+
+    def descr_at_fork_reinit(self, space):
+        # XXX this it not good enough! CPython leaks the underlying lock
+        self.__init__(space)
 
 
-Lock.typedef = TypeDef("thread.lock",
-    __doc__ = """\
+Lock.typedef = TypeDef(
+    "_thread.lock",
+    __doc__="""\
 A lock object is a synchronization primitive.  To create a lock,
 call the thread.allocate_lock() function.  Methods are:
 
@@ -147,18 +145,20 @@ locked() -- test whether the lock is currently locked
 A lock is not owned by the thread that locked it; another thread may
 unlock it.  A thread attempting to lock a lock that it has already locked
 will block until another thread unlocks it.  Deadlocks may ensue.""",
-    acquire = descr_acquire,
-    _py3k_acquire = descr_py3k_acquire,
-    release = descr_release,
-    locked  = descr_locked,
-    __enter__ = descr__enter__,
-    __exit__ = descr__exit__,
+    acquire=interp2app(Lock.descr_lock_acquire),
+    release=interp2app(Lock.descr_lock_release),
+    locked=interp2app(Lock.descr_lock_locked),
+    __enter__=interp2app(Lock.descr__enter__),
+    __exit__=interp2app(Lock.descr__exit__),
+    __repr__ = interp2app(Lock.descr__repr__),
     __weakref__ = make_weakref_descr(Lock),
     # Obsolete synonyms
-    acquire_lock = descr_acquire,
-    release_lock = descr_release,
-    locked_lock  = descr_locked,
-    )
+    acquire_lock=interp2app(Lock.descr_lock_acquire),
+    release_lock=interp2app(Lock.descr_lock_release),
+    locked_lock=interp2app(Lock.descr_lock_locked),
+
+    _at_fork_reinit=interp2app(Lock.descr_at_fork_reinit),
+)
 
 
 def allocate_lock(space):
@@ -166,66 +166,60 @@ def allocate_lock(space):
 See LockType.__doc__ for information about locks."""
     return Lock(space)
 
-class W_RLock(W_Root):
-    # Does not exist in CPython 2.x. Back-ported from PyPy3. See issue #2905
+def _set_sentinel(space):
+    """_set_sentinel() -> lock
 
-    def __init__(self, space, w_active=None):
+    Set a sentinel lock that will be released when the current thread 
+    state is finalized (after it is untied from the interpreter).
+
+    This is a private API for the threading module."""
+    # see issue 18808. We need to release this lock just before exiting any thread!
+    ec = space.getexecutioncontext()
+    # after forking the lock must be recreated! forget the old lock
+    lock = Lock(space)
+    ec._sentinel_lock = lock
+    return lock
+
+class W_RLock(W_Root):
+    def __init__(self, space):
         self.rlock_count = 0
         self.rlock_owner = 0
-        self.w_active = w_active    # dictionary 'threading._active'
         try:
             self.lock = rthread.allocate_lock()
         except rthread.error:
             raise wrap_thread_error(space, "cannot allocate lock")
 
-    def descr__new__(space, w_subtype, w_active=None):
+    def descr__new__(space, w_subtype):
         self = space.allocate_instance(W_RLock, w_subtype)
-        W_RLock.__init__(self, space, w_active)
+        W_RLock.__init__(self, space)
         return self
 
     def descr__repr__(self, space):
-        w_type = space.type(self)
-        classname = w_type.name
-        if self.rlock_owner == 0:
-            owner = "None"
+        classname = space.getfulltypename(self)
+        if self.rlock_count == 0:
+            locked = "unlocked"
         else:
-            owner = str(self.rlock_owner)
-            if self.w_active is not None:
-                try:
-                    w_owner = space.getitem(self.w_active,
-                                                space.newint(self.rlock_owner))
-                    w_name = space.getattr(w_owner, space.newtext('name'))
-                    owner = space.text_w(space.repr(w_name))
-                except OperationError as e:
-                    if e.async(space):
-                        raise
-        return space.newtext("<%s owner=%s count=%d>" % (
-            classname, owner, self.rlock_count))
+            locked = "locked"
+        return self.getrepr(space, '%s %s object owner=%d count=%d' % (
+            locked, classname, self.rlock_owner, self.rlock_count))
 
-    @unwrap_spec(blocking=int)
-    def acquire_w(self, space, blocking=1):
-        """Acquire a lock, blocking or non-blocking.
+    @unwrap_spec(blocking=int, timeout=float)
+    def acquire_w(self, space, blocking=True, timeout=-1.0):
+        """Lock the lock.  `blocking` indicates whether we should wait
+        for the lock to be available or not.  If `blocking` is False
+        and another thread holds the lock, the method will return False
+        immediately.  If `blocking` is True and another thread holds
+        the lock, the method will wait for the lock to be released,
+        take it and then return True.
+        (note: the blocking operation is not interruptible.)
 
-        When invoked without arguments: if this thread already owns the lock,
-        increment the recursion level by one, and return immediately. Otherwise,
-        if another thread owns the lock, block until the lock is unlocked. Once
-        the lock is unlocked (not owned by any thread), then grab ownership, set
-        the recursion level to one, and return. If more than one thread is
-        blocked waiting until the lock is unlocked, only one at a time will be
-        able to grab ownership of the lock. There is no return value in this
-        case.
-
-        When invoked with the blocking argument set to true, do the same thing
-        as when called without arguments, and return true.
-
-        When invoked with the blocking argument set to false, do not block. If a
-        call without an argument would block, return false immediately;
-        otherwise, do the same thing as when called without arguments, and
-        return true.
-
-        """
+        In all other cases, the method will return True immediately.
+        Precisely, if the current thread already holds the lock, its
+        internal counter is simply incremented. If nobody holds the lock,
+        the lock is taken and its internal counter initialized to 1."""
+        microseconds = parse_acquire_args(space, blocking, timeout)
         tid = rthread.get_ident()
-        if tid == self.rlock_owner:
+        if self.rlock_count > 0 and tid == self.rlock_owner:
             try:
                 self.rlock_count = ovfcheck(self.rlock_count + 1)
             except OverflowError:
@@ -233,49 +227,59 @@ class W_RLock(W_Root):
                             "internal lock count overflowed")
             return space.w_True
 
-        rc = self.lock.acquire(blocking != 0)
-        if rc:
+        r = True
+        if self.rlock_count > 0 or not self.lock.acquire(False):
+            if not blocking:
+                return space.w_False
+            r = acquire_timed(space, self.lock, microseconds)
+            r = (r == RPY_LOCK_ACQUIRED)
+        if r:
+            assert self.rlock_count == 0
             self.rlock_owner = tid
             self.rlock_count = 1
-        return space.newbool(rc)
+
+        return space.newbool(r)
 
     def release_w(self, space):
-        """Release a lock, decrementing the recursion level.
+        """Release the lock, allowing another thread that is blocked waiting for
+        the lock to acquire the lock.  The lock must be in the locked state,
+        and must be locked by the same thread that unlocks it; otherwise a
+        `RuntimeError` is raised.
 
-        If after the decrement it is zero, reset the lock to unlocked (not owned
-        by any thread), and if any other threads are blocked waiting for the
-        lock to become unlocked, allow exactly one of them to proceed. If after
-        the decrement the recursion level is still nonzero, the lock remains
-        locked and owned by the calling thread.
-
-        Only call this method when the calling thread owns the lock. A
-        RuntimeError is raised if this method is called when the lock is
-        unlocked.
-
-        There is no return value.
-
-        """
-        if self.rlock_owner != rthread.get_ident():
+        Do note that if the lock was acquire()d several times in a row by the
+        current thread, release() needs to be called as many times for the lock
+        to be available for other threads."""
+        tid = rthread.get_ident()
+        if self.rlock_count == 0 or self.rlock_owner != tid:
             raise oefmt(space.w_RuntimeError,
                         "cannot release un-acquired lock")
         self.rlock_count -= 1
         if self.rlock_count == 0:
             self.rlock_owner = 0
-            try_release(space, self.lock)
+            self.lock.release()
 
     def is_owned_w(self, space):
         """For internal use by `threading.Condition`."""
-        return space.newbool(self.rlock_owner == rthread.get_ident())
+        tid = rthread.get_ident()
+        if self.rlock_count > 0 and self.rlock_owner == tid:
+            return space.w_True
+        else:
+            return space.w_False
 
-    def acquire_restore_w(self, space, w_count_owner):
+    def acquire_restore_w(self, space, w_saved_state):
         """For internal use by `threading.Condition`."""
         # saved_state is the value returned by release_save()
-        w_count, w_owner = space.unpackiterable(w_count_owner, 2)
+        w_count, w_owner = space.unpackiterable(w_saved_state, 2)
         count = space.int_w(w_count)
         owner = space.int_w(w_owner)
-        self.lock.acquire(True)
-        self.rlock_count = count
+        r = True
+        if not self.lock.acquire(False):
+            r = self.lock.acquire(True)
+        if not r:
+            raise wrap_thread_error(space, "coult not acquire lock")
+        assert self.rlock_count == 0
         self.rlock_owner = owner
+        self.rlock_count = count
 
     def release_save_w(self, space):
         """For internal use by `threading.Condition`."""
@@ -284,7 +288,7 @@ class W_RLock(W_Root):
                         "cannot release un-acquired lock")
         count, self.rlock_count = self.rlock_count, 0
         owner, self.rlock_owner = self.rlock_owner, 0
-        try_release(space, self.lock)
+        self.lock.release()
         return space.newtuple([space.newint(count), space.newint(owner)])
 
     def descr__enter__(self, space):
@@ -294,11 +298,13 @@ class W_RLock(W_Root):
     def descr__exit__(self, space, __args__):
         self.release_w(space)
 
-    def descr__note(self, space, __args__):
-        pass   # compatibility with the _Verbose base class in Python
+    def descr_at_fork_reinit(self, space):
+        # XXX not good enough, cpython leaks the OS lock
+        self.__init__(space)
+
 
 W_RLock.typedef = TypeDef(
-    "thread.RLock",
+    "_thread.RLock",
     __new__ = interp2app(W_RLock.descr__new__.im_func),
     acquire = interp2app(W_RLock.acquire_w),
     release = interp2app(W_RLock.release_w),
@@ -309,5 +315,5 @@ W_RLock.typedef = TypeDef(
     __exit__ = interp2app(W_RLock.descr__exit__),
     __weakref__ = make_weakref_descr(W_RLock),
     __repr__ = interp2app(W_RLock.descr__repr__),
-    _note = interp2app(W_RLock.descr__note),
+    _at_fork_reinit = interp2app(W_RLock.descr_at_fork_reinit),
     )

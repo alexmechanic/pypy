@@ -6,7 +6,6 @@ from pypy.module.cpyext.pyobject import PyObject, PyObjectP, from_ref, make_ref
 from rpython.rtyper.lltypesystem import rffi, lltype
 from rpython.rlib.rarithmetic import widen
 from rpython.tool.sourcetools import func_with_new_name
-from pypy.module.cpyext.state import State
 from pypy.objspace.std import newformat
 
 @cpython_api([PyObject], rffi.INT_real, error=CANNOT_FAIL)
@@ -14,11 +13,13 @@ def PyIndex_Check(space, w_obj):
     """Returns True if o is an index integer (has the nb_index slot of the
     tp_as_number structure filled in).
     """
-    try:
-        space.index(w_obj)
-        return 1
-    except OperationError:
+    # According to CPython, this means: w_obj is not None, and
+    # the type of w_obj has got a method __index__
+    if w_obj is None:
         return 0
+    if space.lookup(w_obj, '__index__'):
+        return 1
+    return 0
 
 @cpython_api([PyObject], rffi.INT_real, error=CANNOT_FAIL)
 def PyNumber_Check(space, w_obj):
@@ -28,7 +29,8 @@ def PyNumber_Check(space, w_obj):
     # the type of w_obj has got a method __int__ or __float__.
     if w_obj is None:
         return 0
-    if space.lookup(w_obj, '__int__') or space.lookup(w_obj, '__float__'):
+    if (space.lookup(w_obj, '__int__') or space.lookup(w_obj, '__float__') or
+            space.lookup(w_obj, '__index__')):
         return 1
     return 0
 
@@ -60,16 +62,10 @@ def PyNumber_AsSsize_t(space, w_obj, w_exc):
             raise
 
 @cpython_api([PyObject], PyObject)
-def PyNumber_Int(space, w_obj):
-    """Returns the o converted to an integer object on success, or NULL on failure.
-    This is the equivalent of the Python expression int(o)."""
-    return space.call_function(space.w_int, w_obj)
-
-@cpython_api([PyObject], PyObject)
 def PyNumber_Long(space, w_obj):
     """Returns the o converted to a long integer object on success, or NULL on
     failure.  This is the equivalent of the Python expression long(o)."""
-    return space.call_function(space.w_long, w_obj)
+    return space.call_function(space.w_int, w_obj)
 
 @cpython_api([PyObject], PyObject)
 def PyNumber_Index(space, w_obj):
@@ -90,48 +86,15 @@ def PyNumber_ToBase(space, w_obj, base):
     if not (base == 2 or base == 8 or base == 10 or base ==16):
         # In Python3.7 this becomes a SystemError. Before that, CPython would
         # assert in debug or segfault in release. bpo 38643
-        raise oefmt(space.w_ValueError,
+        raise oefmt(space.w_SystemError,
                     "PyNumber_ToBase: base must be 2, 8, 10 or 16")
     w_index = space.index(w_obj)
     # A slight hack to call the internal _int_to_base method, which
     # accepts an int base rather than a str spec
-    formatter = newformat.str_formatter(space, '')
+    formatter = newformat.unicode_formatter(space, '')
     value = space.int_w(w_index)
     return space.newtext(formatter._int_to_base(base, value))
     
-
-@cpython_api([PyObjectP, PyObjectP], rffi.INT_real, error=CANNOT_FAIL)
-def PyNumber_CoerceEx(space, pp1, pp2):
-    """This function is similar to PyNumber_Coerce(), except that it returns
-    1 when the conversion is not possible and when no error is raised.
-    Reference counts are still not increased in this case."""
-    retVal = PyNumber_Coerce(space, pp1, pp2)
-    if retVal != 0:
-        return 1
-    return 0
-
-@cpython_api([PyObjectP, PyObjectP], rffi.INT_real, error=CANNOT_FAIL)
-def PyNumber_Coerce(space, pp1, pp2):
-    """This function takes the addresses of two variables of type PyObject*.  If
-    the objects pointed to by *p1 and *p2 have the same type, increment their
-    reference count and return 0 (success). If the objects can be converted to a
-    common numeric type, replace *p1 and *p2 by their converted value (with
-    'new' reference counts), and return 0. If no conversion is possible, or if
-    some other error occurs, return -1 (failure) and don't increment the
-    reference counts.  The call PyNumber_Coerce(&o1, &o2) is equivalent to the
-    Python statement o1, o2 = coerce(o1, o2)."""
-    w_obj1 = from_ref(space, pp1[0])
-    w_obj2 = from_ref(space, pp2[0])
-    try:
-        w_res = space.coerce(w_obj1, w_obj2)
-    except (TypeError, OperationError):
-        state = space.fromcache(State)
-        state.clear_exception()
-        return -1
-    w_res1, w_res2 = space.unpackiterable(w_res, 2)
-    pp1[0] = make_ref(space, w_res1)
-    pp2[0] = make_ref(space, w_res2)
-    return 0
 
 def func_rename(newname):
     return lambda func: func_with_new_name(func, newname)
@@ -174,7 +137,8 @@ for name, spacemeth in [
         ('And', 'and_'),
         ('Xor', 'xor'),
         ('Or', 'or_'),
-        ('Divmod', 'divmod')]:
+        ('Divmod', 'divmod'),
+        ('MatrixMultiply', 'matmul')]:
     cname = 'PyNumber_%s' % (name,)
     globals()[cname] = make_numbermethod(cname, spacemeth)
     if name != 'Divmod':

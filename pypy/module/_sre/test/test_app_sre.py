@@ -4,8 +4,6 @@ import os
 import py
 from py.test import raises, skip
 from pypy.interpreter.gateway import app2interp_temp
-from pypy.module._sre import interp_sre
-from rpython.rlib.rsre.test import support
 
 
 def init_app_test(cls, space):
@@ -22,37 +20,6 @@ def init_app_test(cls, space):
             sys.path.pop(0)
         """)
 
-def _test_sre_ctx_(self, str, start, end):
-    # Use the MatchContextForTests class, which handles Position
-    # instances instead of plain integers.  This is used to detect when
-    # we're accepting or escaping a Position to app-level, which we
-    # should not: Positions are meant to be byte indexes inside a
-    # possibly UTF8 string, not character indexes.
-    if not isinstance(start, support.Position):
-        start = support.Position(start)
-    if not isinstance(end, support.Position):
-        end = support.Position(end)
-    return support.MatchContextForTests(str, start, end)
-
-def _bytepos_to_charindex(self, bytepos):
-    if isinstance(self.ctx, support.MatchContextForTests):
-        return self.ctx._real_pos(bytepos)
-    return _org_maker[1](self, bytepos)
-
-def setup_module(mod):
-    mod._org_maker = (
-        interp_sre.W_SRE_Pattern._make_str_match_context,
-        interp_sre.W_SRE_Match.bytepos_to_charindex,
-        )
-    interp_sre.W_SRE_Pattern._make_str_match_context = _test_sre_ctx_
-    interp_sre.W_SRE_Match.bytepos_to_charindex = _bytepos_to_charindex
-
-def teardown_module(mod):
-    (
-        interp_sre.W_SRE_Pattern._make_str_match_context,
-        interp_sre.W_SRE_Match.bytepos_to_charindex,
-    ) = mod._org_maker
-
 
 class AppTestSrePy:
     def test_magic(self):
@@ -62,6 +29,8 @@ class AppTestSrePy:
     def test_codesize(self):
         import _sre
         assert _sre.getcodesize() == _sre.CODESIZE
+        # in py3.7, it should always be 4
+        assert _sre.CODESIZE == 4
 
 
 class AppTestSrePattern:
@@ -69,21 +38,24 @@ class AppTestSrePattern:
         # This imports support_test_sre as the global "s"
         init_app_test(cls, cls.space)
 
+    spaceconfig = {'usemodules': ['itertools']}
+
     def test_copy(self):
-        # copy support is disabled by default in _sre.c
+        # new in 3.7
         import re
         p = re.compile("b")
-        raises(TypeError, p.__copy__)        # p.__copy__() should raise
-        raises(TypeError, p.__deepcopy__)    # p.__deepcopy__() should raise
+        assert p.__copy__() is p
+        assert p.__deepcopy__("whatever") is p
 
     def test_creation_attributes(self):
         import re
-        pattern_string = "(b)l(?P<g>a)"
+        pattern_string = b"(b)l(?P<g>a)"
         p = re.compile(pattern_string, re.I | re.M)
         assert pattern_string == p.pattern
         assert re.I | re.M == p.flags
         assert 2 == p.groups
         assert {"g": 2} == p.groupindex
+        raises(TypeError, "p.groupindex['g'] = 3")
 
     def test_repeat_minmax_overflow(self):
         import re
@@ -91,6 +63,10 @@ class AppTestSrePattern:
         assert re.match(r".{%d}" % (self.s.MAXREPEAT - 1), string) is None
         assert re.match(r".{,%d}" % (self.s.MAXREPEAT - 1), string).span() == (0, 100000)
         assert re.match(r".{%d,}?" % (self.s.MAXREPEAT - 1), string) is None
+        import sys
+        if sys.version_info[:3] <= (3, 2, 3):
+            # XXX: These are fixed in 3.2.4 or so
+            return
         raises(OverflowError, re.compile, r".{%d}" % self.s.MAXREPEAT)
         raises(OverflowError, re.compile, r".{,%d}" % self.s.MAXREPEAT)
         raises(OverflowError, re.compile, r".{%d,}?" % self.s.MAXREPEAT)
@@ -119,7 +95,7 @@ class AppTestSrePattern:
         assert ["a", "u"] == re.findall("b(.)", "abalbus")
         assert [("a", "l"), ("u", "s")] == re.findall("b(.)(.)", "abalbus")
         assert [("a", ""), ("s", "s")] == re.findall("b(a|(s))", "babs")
-        assert ['', '', '', ''] == re.findall("X??", "1X4")   # changes in 3.7
+        assert ['', '', 'X', '', ''] == re.findall("X??", "1X4")  # new in 3.7
 
     def test_findall_unicode(self):
         import re
@@ -132,9 +108,9 @@ class AppTestSrePattern:
     def test_finditer(self):
         import re
         it = re.finditer("b(.)", "brabbel")
-        assert "br" == it.next().group(0)
-        assert "bb" == it.next().group(0)
-        raises(StopIteration, it.next)
+        assert "br" == next(it).group(0)
+        assert "bb" == next(it).group(0)
+        raises(StopIteration, next, it)
 
     def test_split(self):
         import re
@@ -143,9 +119,8 @@ class AppTestSrePattern:
         assert ['', 'a', 'l', 'a', 'lla'] == re.split("b(a)", "balballa")
         assert ['', 'a', None, 'l', 'u', None, 'lla'] == (
             re.split("b([ua]|(s))", "balbulla"))
-        assert ["abc"] == re.split("", "abc")
-        assert ["abc"] == re.split("X?", "abc")
-        assert ["a", "c"] == re.split("b?", "abc")
+        assert ['Hello \udce2\udc9c\udc93', ''] == re.split(r'\r\n|\r|\n',
+                    'Hello \udce2\udc9c\udc93\n')
 
     def test_weakref(self):
         import re, _weakref
@@ -156,16 +131,63 @@ class AppTestSrePattern:
         res = re.match(r'(a)|(b)', 'b').start(1)
         assert res == -1
 
+    def test_pattern_check(self):
+        import _sre
+        raises(TypeError, _sre.compile, {}, 0, [])
+
+    def test_fullmatch(self):
+        import re
+        assert re.compile(r"ab*c").fullmatch("abbcdef") is None
+        assert re.compile(r"ab*c").fullmatch("abbc") is not None
+        assert re.fullmatch(r"ab*c", "abbbcdef") is None
+        assert re.fullmatch(r"ab*c", "abbbc") is not None
+
+    def test_repr(self):
+        import re
+        r = re.compile(r'f(o"\d)', 0)
+        assert repr(r) == (
+            r"""re.compile('f(o"\\d)')""")
+        r = re.compile(r'f(o"\d)', re.IGNORECASE|re.DOTALL|re.VERBOSE)
+        assert repr(r) == (
+            r"""re.compile('f(o"\\d)', re.IGNORECASE|re.DOTALL|re.VERBOSE)""")
+
+    def test_pattern_compare(self):
+        import re
+        pattern1 = re.compile('abc', re.IGNORECASE)
+
+        # equal to itself
+        assert pattern1 == pattern1
+        assert not(pattern1 != pattern1)
+        # equal
+        re.purge()
+        pattern2 = re.compile('abc', re.IGNORECASE)
+        assert hash(pattern2) == hash(pattern1)
+        assert pattern2 == pattern1
+
+        # not equal: different pattern
+        re.purge()
+        pattern3 = re.compile('XYZ', re.IGNORECASE)
+        # warranty that hash values are different
+        assert pattern3 != pattern1
+
+        # not equal: different flag (flags=0)
+        re.purge()
+        pattern4 = re.compile('abc')
+        assert pattern4 != pattern1
+
+        # only == and != comparison operators are supported
+        raises(TypeError, "pattern1 < pattern2")
+
 
 class AppTestSreMatch:
     spaceconfig = dict(usemodules=('array', ))
 
     def test_copy(self):
         import re
-        # copy support is disabled by default in _sre.c
+        # new in 3.7
         m = re.match("bla", "bla")
-        raises(TypeError, m.__copy__)
-        raises(TypeError, m.__deepcopy__)
+        assert m.__copy__() is m
+        assert m.__deepcopy__("whatever") is m
 
     def test_match_attributes(self):
         import re
@@ -246,35 +268,47 @@ class AppTestSreMatch:
         import sys
         if sys.version_info < (2, 7, 9):
             skip()
-        assert re.match("(foo)", "foo").group(1L) == "foo"
-        exc = raises(IndexError, re.match("", "").group, sys.maxint + 1)
+        assert re.match("(foo)", "foo").group(1) == "foo"
+        exc = raises(IndexError, re.match("", "").group, sys.maxsize + 1)
         assert str(exc.value) == "no such group"
+
+    def test_group_takes_index(self):
+        import re
+        class Index:
+            def __init__(self, value):
+                self.value = value
+            def __index__(self):
+                return self.value
+        assert re.match("(foo)", "foo").group(Index(1)) == "foo"
+
+    def test_getitem(self):
+        import re
+        assert re.match("(foo)bar", "foobar")[1] == "foo"
 
     def test_expand(self):
         import re
         m = re.search("a(..)(?P<name>..)", "ab1bc")
         assert "b1bcbc" == m.expand(r"\1\g<name>\2")
 
-    def test_sub(self):
+    def test_sub_bytes(self):
         import re
-        assert "bbbbb" == re.sub("a", "b", "ababa")
-        assert ("bbbbb", 3) == re.subn("a", "b", "ababa")
-        assert "dddd" == re.sub("[abc]", "d", "abcd")
-        assert ("dddd", 3) == re.subn("[abc]", "d", "abcd")
-        assert "rbd\nbr\n" == re.sub("a(.)", r"b\1\n", "radar")
-        assert ("rbd\nbr\n", 2) == re.subn("a(.)", r"b\1\n", "radar")
-        assert ("bbbba", 2) == re.subn("a", "b", "ababa", 2)
-        assert "XaXbXcX" == re.sub("", "X", "abc")
+        assert b"bbbbb" == re.sub(b"a", b"b", b"ababa")
+        assert (b"bbbbb", 3) == re.subn(b"a", b"b", b"ababa")
+        assert b"dddd" == re.sub(b"[abc]", b"d", b"abcd")
+        assert (b"dddd", 3) == re.subn(b"[abc]", b"d", b"abcd")
+        assert b"rbd\nbr\n" == re.sub(b"a(.)", br"b\1\n", b"radar")
+        assert (b"rbd\nbr\n", 2) == re.subn(b"a(.)", br"b\1\n", b"radar")
+        assert (b"bbbba", 2) == re.subn(b"a", b"b", b"ababa", 2)
 
     def test_sub_unicode(self):
         import re
-        assert isinstance(re.sub(u"a", u"b", u""), unicode)
+        assert isinstance(re.sub("a", "b", ""), str)
         # the input is returned unmodified if no substitution is performed,
         # which (if interpreted literally, as CPython does) gives the
         # following strangeish rules:
-        assert isinstance(re.sub(u"a", u"b", "diwoiioamoi"), unicode)
-        assert isinstance(re.sub(u"a", u"b", "diwoiiobmoi"), str)
-        assert isinstance(re.sub(u'x', 'y', 'x'), str)
+        assert isinstance(re.sub("a", "b", "diwoiioamoi"), str)
+        raises(TypeError, re.sub, "a", "b", b"diwoiiobmoi")
+        raises(TypeError, re.sub, 'x', b'y', b'x')
 
     def test_sub_callable(self):
         import re
@@ -291,31 +325,20 @@ class AppTestSreMatch:
             return None
         assert "acd" == re.sub("b", call_me, "abcd")
 
-    def test_sub_callable_suddenly_unicode(self):
-        import re
-        def call_me(match):
-            if match.group() == 'A':
-                return unichr(0x3039)
-            return ''
-        assert (u"bb\u3039b", 2) == re.subn("[aA]", call_me, "babAb")
-
     def test_sub_subclass_of_str(self):
         import re
         class MyString(str):
             pass
-        class MyUnicode(unicode):
+        class MyBytes(bytes):
             pass
         s1 = MyString('zz')
         s2 = re.sub('aa', 'bb', s1)
         assert s2 == s1
         assert type(s2) is str       # and not MyString
-        s2 = re.sub(u'aa', u'bb', s1)
-        assert s2 == s1
-        assert type(s2) is str       # and not MyString
-        u1 = MyUnicode(u'zz')
-        u2 = re.sub(u'aa', u'bb', u1)
+        u1 = MyBytes(b'zz')
+        u2 = re.sub(b'aa', b'bb', u1)
         assert u2 == u1
-        assert type(u2) is unicode   # and not MyUnicode
+        assert type(u2) is bytes   # and not MyBytes
 
     def test_sub_bug(self):
         import re
@@ -331,16 +354,36 @@ class AppTestSreMatch:
         assert re.sub(b"a", b"b", s) is s
         s = u"ccccccc"
         assert re.sub(u"a", u"b", s) is s
+        
+    def test_sub_bytearray(self):
+        import re
+        assert re.sub(b'a', bytearray(b'A'), b'axa') == b'AxA'
+        # this fails on CPython 3.5:
+        assert re.sub(b'a', bytearray(b'\\n'), b'axa') == b'\nx\n'
+
+    def test_sub_emptymatch(self):
+        import re
+        assert re.sub(r"b*", "*", "abc") == "*a**c*"
 
     def test_match_array(self):
         import re, array
-        a = array.array('c', 'hello')
-        m = re.match('hel+', a)
+        a = array.array('b', b'hello')
+        m = re.match(b'hel+', a)
         assert m.end() == 4
 
     def test_match_typeerror(self):
         import re
         raises(TypeError, re.match, 'hel+', list('hello'))
+
+    def test_match_repr(self):
+        import re
+        m = re.search("ab+c", "xabbbcd")
+        assert repr(m) == "<re.Match object; span=(1, 6), match='abbbc'>"
+
+    def test_unicode_iscased(self):
+        import _sre
+        assert _sre.unicode_iscased(64261)
+        assert not _sre.unicode_iscased(32)
 
     def test_group_bugs(self):
         import re
@@ -396,6 +439,9 @@ class AppTestSreMatch:
 
 
 class AppTestSreScanner:
+
+    spaceconfig = {'usemodules': ['itertools']}
+
     def test_scanner_attributes(self):
         import re
         p = re.compile("bla")
@@ -438,9 +484,16 @@ class AppTestSreScanner:
     def test_scanner_empty_match(self):
         import re, sys
         p = re.compile("a??").scanner("bac")
-        assert ("", "", "", "") == (p.search().group(0), p.search().group(0),
-                                    p.search().group(0), p.search().group(0))
+        assert ("", "", "a", "", "") == (
+            p.search().group(0), p.search().group(0), p.search().group(0),
+            p.search().group(0), p.search().group(0))
         assert None == p.search()
+
+    def test_no_pattern(self):
+        import sre_compile, sre_parse
+        sre_pattern = sre_compile.compile(
+            sre_parse.SubPattern(sre_parse.State()))
+        assert sre_pattern.scanner('s') is not None
 
 
 class AppTestGetlower:
@@ -462,37 +515,23 @@ class AppTestGetlower:
         s = self.s
         UPPER_AE = "\xc4"
         s.assert_lower_equal([("a", "a"), ("A", "a"), (UPPER_AE, UPPER_AE),
-            (u"\u00c4", u"\u00c4"), (u"\u4444", u"\u4444")], 0)
-
-    def test_getlower_locale(self):
-        s = self.s
-        import locale, sre_constants
-        UPPER_AE = "\xc4"
-        LOWER_AE = "\xe4"
-        UPPER_PI = u"\u03a0"
-        try:
-            locale.setlocale(locale.LC_ALL, "de_DE")
-            s.assert_lower_equal([("a", "a"), ("A", "a"), (UPPER_AE, LOWER_AE),
-                (u"\u00c4", u"\u00e4"), (UPPER_PI, UPPER_PI)],
-                sre_constants.SRE_FLAG_LOCALE)
-        except locale.Error:
-            # skip test
-            skip("unsupported locale de_DE")
+            ("\u00c4", "\u00c4"), ("\u4444", "\u4444")], 0)
 
     def test_getlower_unicode(self):
         s = self.s
         import sre_constants
         UPPER_AE = "\xc4"
         LOWER_AE = "\xe4"
-        UPPER_PI = u"\u03a0"
-        LOWER_PI = u"\u03c0"
+        UPPER_PI = "\u03a0"
+        LOWER_PI = "\u03c0"
         s.assert_lower_equal([("a", "a"), ("A", "a"), (UPPER_AE, LOWER_AE),
-            (u"\u00c4", u"\u00e4"), (UPPER_PI, LOWER_PI),
-            (u"\u4444", u"\u4444")], sre_constants.SRE_FLAG_UNICODE)
+            ("\u00c4", "\u00e4"), (UPPER_PI, LOWER_PI),
+            ("\u4444", "\u4444")], sre_constants.SRE_FLAG_UNICODE)
 
 
 class AppTestSimpleSearches:
-    spaceconfig = {"usemodules": ['array']}
+
+    spaceconfig = {'usemodules': ('array', 'itertools')}
 
     def test_search_simple_literal(self):
         import re
@@ -511,26 +550,26 @@ class AppTestSimpleSearches:
 
     def test_search_simple_boundaries(self):
         import re
-        UPPER_PI = u"\u03a0"
+        UPPER_PI = "\u03a0"
         assert re.search(r"bla\b", "bla")
         assert re.search(r"bla\b", "bla ja")
-        assert re.search(r"bla\b", u"bla%s" % UPPER_PI)
+        assert re.search(r"bla\b", "bla%s" % UPPER_PI, re.ASCII)
         assert not re.search(r"bla\b", "blano")
-        assert not re.search(r"bla\b", u"bla%s" % UPPER_PI, re.UNICODE)
+        assert not re.search(r"bla\b", "bla%s" % UPPER_PI, re.UNICODE)
 
     def test_search_simple_categories(self):
         import re
-        LOWER_PI = u"\u03c0"
-        INDIAN_DIGIT = u"\u0966"
-        EM_SPACE = u"\u2001"
+        LOWER_PI = "\u03c0"
+        INDIAN_DIGIT = "\u0966"
+        EM_SPACE = "\u2001"
         LOWER_AE = "\xe4"
         assert re.search(r"bla\d\s\w", "bla3 b")
-        assert re.search(r"b\d", u"b%s" % INDIAN_DIGIT, re.UNICODE)
-        assert not re.search(r"b\D", u"b%s" % INDIAN_DIGIT, re.UNICODE)
-        assert re.search(r"b\s", u"b%s" % EM_SPACE, re.UNICODE)
-        assert not re.search(r"b\S", u"b%s" % EM_SPACE, re.UNICODE)
-        assert re.search(r"b\w", u"b%s" % LOWER_PI, re.UNICODE)
-        assert not re.search(r"b\W", u"b%s" % LOWER_PI, re.UNICODE)
+        assert re.search(r"b\d", "b%s" % INDIAN_DIGIT, re.UNICODE)
+        assert not re.search(r"b\D", "b%s" % INDIAN_DIGIT, re.UNICODE)
+        assert re.search(r"b\s", "b%s" % EM_SPACE, re.UNICODE)
+        assert not re.search(r"b\S", "b%s" % EM_SPACE, re.UNICODE)
+        assert re.search(r"b\w", "b%s" % LOWER_PI, re.UNICODE)
+        assert not re.search(r"b\W", "b%s" % LOWER_PI, re.UNICODE)
         assert re.search(r"b\w", "b%s" % LOWER_AE, re.UNICODE)
 
     def test_search_simple_any(self):
@@ -541,38 +580,38 @@ class AppTestSimpleSearches:
 
     def test_search_simple_in(self):
         import re
-        UPPER_PI = u"\u03a0"
-        LOWER_PI = u"\u03c0"
-        EM_SPACE = u"\u2001"
-        LINE_SEP = u"\u2028"
+        UPPER_PI = "\u03a0"
+        LOWER_PI = "\u03c0"
+        EM_SPACE = "\u2001"
+        LINE_SEP = "\u2028"
         assert re.search(r"b[\da-z]a", "bb1a")
         assert re.search(r"b[\da-z]a", "bbsa")
         assert not re.search(r"b[\da-z]a", "bbSa")
         assert re.search(r"b[^okd]a", "bsa")
         assert not re.search(r"b[^okd]a", "bda")
-        assert re.search(u"b[%s%s%s]a" % (LOWER_PI, UPPER_PI, EM_SPACE),
-            u"b%sa" % UPPER_PI) # bigcharset
-        assert re.search(u"b[%s%s%s]a" % (LOWER_PI, UPPER_PI, EM_SPACE),
-            u"b%sa" % EM_SPACE)
-        assert not re.search(u"b[%s%s%s]a" % (LOWER_PI, UPPER_PI, EM_SPACE),
-            u"b%sa" % LINE_SEP)
+        assert re.search("b[%s%s%s]a" % (LOWER_PI, UPPER_PI, EM_SPACE),
+            "b%sa" % UPPER_PI) # bigcharset
+        assert re.search("b[%s%s%s]a" % (LOWER_PI, UPPER_PI, EM_SPACE),
+            "b%sa" % EM_SPACE)
+        assert not re.search("b[%s%s%s]a" % (LOWER_PI, UPPER_PI, EM_SPACE),
+            "b%sa" % LINE_SEP)
 
     def test_search_simple_literal_ignore(self):
         import re
-        UPPER_PI = u"\u03a0"
-        LOWER_PI = u"\u03c0"
+        UPPER_PI = "\u03a0"
+        LOWER_PI = "\u03c0"
         assert re.search(r"ba", "ba", re.IGNORECASE)
         assert re.search(r"ba", "BA", re.IGNORECASE)
-        assert re.search(u"b%s" % UPPER_PI, u"B%s" % LOWER_PI,
+        assert re.search("b%s" % UPPER_PI, "B%s" % LOWER_PI,
             re.IGNORECASE | re.UNICODE)
 
     def test_search_simple_in_ignore(self):
         import re
-        UPPER_PI = u"\u03a0"
-        LOWER_PI = u"\u03c0"
+        UPPER_PI = "\u03a0"
+        LOWER_PI = "\u03c0"
         assert re.search(r"ba[A-C]", "bac", re.IGNORECASE)
         assert re.search(r"ba[a-c]", "baB", re.IGNORECASE)
-        assert re.search(u"ba[%s]" % UPPER_PI, "ba%s" % LOWER_PI,
+        assert re.search("ba[%s]" % UPPER_PI, "ba%s" % LOWER_PI,
             re.IGNORECASE | re.UNICODE)
         assert re.search(r"ba[^A-C]", "bar", re.IGNORECASE)
         assert not re.search(r"ba[^A-C]", "baA", re.IGNORECASE)
@@ -634,13 +673,13 @@ class AppTestSimpleSearches:
 
     def test_search_simple_groupref(self):
         import re
-        UPPER_PI = u"\u03a0"
-        LOWER_PI = u"\u03c0"
+        UPPER_PI = "\u03a0"
+        LOWER_PI = "\u03c0"
         assert re.match(r"((ab)+)c\1", "ababcabab")
         assert not re.match(r"((ab)+)c\1", "ababcab")
         assert not re.search(r"(a|(b))\2", "aa")
         assert re.match(r"((ab)+)c\1", "aBAbcAbaB", re.IGNORECASE)
-        assert re.match(r"((a.)+)c\1", u"a%sca%s" % (UPPER_PI, LOWER_PI),
+        assert re.match(r"((a.)+)c\1", "a%sca%s" % (UPPER_PI, LOWER_PI),
             re.IGNORECASE | re.UNICODE)
 
     def test_search_simple_groupref_exists(self):
@@ -666,6 +705,9 @@ class AppTestSimpleSearches:
 
 
 class AppTestMarksStack:
+
+    spaceconfig = {'usemodules': ['itertools']}
+
     def test_mark_stack_branch(self):
         import re
         m = re.match("b(.)a|b.b", "bob")
@@ -782,7 +824,7 @@ class AppTestOpcodes:
             s.assert_no_match(opcodes, ["blaja", ""])
             opcodes = [s.OPCODES["at"], s.ATCODES[atname]] \
                 + s.encode_literal("bla") + [s.OPCODES["success"]]
-            s.assert_match(opcodes, "bla")
+            assert s.search(opcodes, "bla")
             s.assert_no_match(opcodes, "")
 
     def test_at_non_boundary(self):
@@ -790,7 +832,7 @@ class AppTestOpcodes:
         for atname in "at_non_boundary", "at_loc_non_boundary", "at_uni_non_boundary":
             opcodes = s.encode_literal("bla") \
                 + [s.OPCODES["at"], s.ATCODES[atname], s.OPCODES["success"]]
-            s.assert_match(opcodes, "blan")
+            assert s.search(opcodes, "blan")
             s.assert_no_match(opcodes, ["bla ja", "bla"])
 
     def test_at_loc_boundary(self):
@@ -802,12 +844,12 @@ class AppTestOpcodes:
                 + [s.OPCODES["at"], s.ATCODES["at_loc_boundary"], s.OPCODES["success"]]
             opcodes2 = s.encode_literal("bla") \
                 + [s.OPCODES["at"], s.ATCODES["at_loc_non_boundary"], s.OPCODES["success"]]
-            s.assert_match(opcodes1, "bla\xFC")
+            assert s.search(opcodes1, "bla\xFC")
             s.assert_no_match(opcodes2, "bla\xFC")
             oldlocale = locale.setlocale(locale.LC_ALL)
             locale.setlocale(locale.LC_ALL, "de_DE")
             s.assert_no_match(opcodes1, "bla\xFC")
-            s.assert_match(opcodes2, "bla\xFC")
+            assert s.search(opcodes2, "bla\xFC")
             locale.setlocale(locale.LC_ALL, oldlocale)
         except locale.Error:
             # skip test
@@ -815,15 +857,15 @@ class AppTestOpcodes:
 
     def test_at_uni_boundary(self):
         s = self.s
-        UPPER_PI = u"\u03a0"
-        LOWER_PI = u"\u03c0"
+        UPPER_PI = "\u03a0"
+        LOWER_PI = "\u03c0"
         opcodes = s.encode_literal("bl") + [s.OPCODES["any"], s.OPCODES["at"],
             s.ATCODES["at_uni_boundary"], s.OPCODES["success"]]
-        s.assert_match(opcodes, ["bla ha", u"bl%s ja" % UPPER_PI])
-        s.assert_no_match(opcodes, [u"bla%s" % LOWER_PI])
+        s.assert_match(opcodes, ["bla ha", "bl%s ja" % UPPER_PI])
+        s.assert_no_match(opcodes, ["bla%s" % LOWER_PI])
         opcodes = s.encode_literal("bl") + [s.OPCODES["any"], s.OPCODES["at"],
             s.ATCODES["at_uni_non_boundary"], s.OPCODES["success"]]
-        s.assert_match(opcodes, ["blaha", u"bl%sja" % UPPER_PI])
+        s.assert_match(opcodes, ["blaha", "bl%sja" % UPPER_PI])
 
     def test_category_loc_word(self):
         s = self.s
@@ -834,13 +876,11 @@ class AppTestOpcodes:
                 + [s.OPCODES["category"], s.CHCODES["category_loc_word"], s.OPCODES["success"]]
             opcodes2 = s.encode_literal("b") \
                 + [s.OPCODES["category"], s.CHCODES["category_loc_not_word"], s.OPCODES["success"]]
-            s.assert_no_match(opcodes1, "b\xFC")
-            s.assert_no_match(opcodes1, u"b\u00FC")
-            s.assert_match(opcodes2, "b\xFC")
+            assert not s.search(opcodes1, u"b\xFC")
+            assert s.search(opcodes2, u"b\xFC")
             locale.setlocale(locale.LC_ALL, "de_DE")
-            s.assert_match(opcodes1, "b\xFC")
-            s.assert_no_match(opcodes1, u"b\u00FC")
-            s.assert_no_match(opcodes2, "b\xFC")
+            assert s.search(opcodes1, u"b\xFC")
+            assert not s.search(opcodes2, u"b\xFC")
             s.void_locale()
         except locale.Error:
             # skip test
@@ -938,10 +978,10 @@ class AppTestOpcodes:
 
     def test_not_literal_ignore(self):
         s = self.s
-        UPPER_PI = u"\u03a0"
+        UPPER_PI = "\u03a0"
         opcodes = s.encode_literal("b") \
             + [s.OPCODES["not_literal_ignore"], ord("a"), s.OPCODES["success"]]
-        s.assert_match(opcodes, ["bb", "bu", u"b%s" % UPPER_PI])
+        s.assert_match(opcodes, ["bb", "bu", "b%s" % UPPER_PI])
         s.assert_no_match(opcodes, ["ba", "bA"])
 
     def test_in_ignore(self):
@@ -1055,6 +1095,8 @@ class AppTestOpcodes:
 class AppTestOptimizations:
     """These tests try to trigger optmized edge cases."""
 
+    spaceconfig = {'usemodules': ['itertools']}
+
     def test_match_length_optimization(self):
         import re
         assert None == re.match("bla", "blub")
@@ -1080,6 +1122,19 @@ class AppTestOptimizations:
         assert re.search(".+ab", "wowowowawoabwowo")
         assert None == re.search(".+ab", "wowowaowowo")
 
+    def test_split_empty(self):
+        import re
+        assert re.split('', '') == ['', '']
+        assert re.split('', 'ab') == ['', 'a', 'b', '']
+        assert re.split('a*', '') == ['', '']
+        assert re.split('a*', 'a') == ['', '', '']
+        assert re.split('a*', 'aa') == ['', '', '']
+        assert re.split('a*', 'baaac') == ['', 'b', '', 'c', '']
+
+    def test_type_names(self):
+        import re
+        assert repr(re.Pattern) == "<class 're.Pattern'>"
+        assert repr(re.Match) == "<class 're.Match'>"
 
 class AppTestUnicodeExtra:
     def test_string_attribute(self):
@@ -1094,3 +1149,40 @@ class AppTestUnicodeExtra:
         import re
         match = re.search(u"\u1234", u"\u1233\u1234\u1235")
         assert match.start() == 1
+
+    def test_match_repr_span(self):
+        import re
+        match = re.match(u"\u1234", u"\u1234")
+        assert match.span() == (0, 1)
+        assert "span=(0, 1), match='\u1234'" in repr(match)
+
+    def test_match_repr_truncation(self):
+        import re
+        s = "xy" + u"\u1234" * 50
+        match = re.match(s, s)
+        # this used to produce invalid utf-8 by truncating repr(s)
+        # after 50 bytes
+        assert "span=(0, 52), match=" + repr(s)[:50] + ">" in repr(match)
+
+    def test_pattern_repr_truncation(self):
+        import re
+        s = "xy" + u"\u1234" * 200
+        pattern = re.compile(s)
+        # this used to produce invalid utf-8 by truncating repr(s)
+        # after 200 bytes
+        assert repr(pattern) == "re.compile(%s)" % (repr(s)[:200],)
+
+    def test_subx_unusual_types_no_match(self):
+        # issue #3515
+        import re
+        result = re.sub(b"x", lambda x: 1/0, memoryview(b"yz"))
+        assert type(result) is bytes
+        assert result == b"yz"
+        class U(str): pass
+        result = re.sub(u"x", lambda x: 1/0, U(u"yz"))
+        assert type(result) is str
+        assert result == u"yz"
+        class B(bytes): pass
+        result = re.sub(b"x", lambda x: 1/0, B(b"yz"))
+        assert type(result) is bytes
+        assert result == b"yz"

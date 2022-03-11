@@ -1,4 +1,24 @@
+import sys, StringIO
 from pypy.interpreter.pycode import _code_const_eq
+
+def test_dump(space):
+    """test that pycode.dump kind of works with py3 opcodes"""
+    compiler = space.createcompiler()
+    code = compiler.compile('lambda *, y=7: None', 'filename', 'exec', 0)
+    output = None
+    stdout = sys.stdout
+    try:
+        sys.stdout = StringIO.StringIO()
+        code.dump()
+        output = sys.stdout.getvalue()
+        sys.stdout.close()
+    finally:
+        sys.stdout = stdout
+    print '>>>\n' + output + '\n<<<'
+    assert ' 0 (7)' in output
+    assert ' 4 (None)' in output
+    assert ' 16 RETURN_VALUE' in output
+
 
 def test_strong_const_equal(space):
     # test that the stronger equal that code objects are supposed to use for

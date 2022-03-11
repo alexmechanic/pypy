@@ -37,11 +37,11 @@ TP_TO_DEFAULT = {
         'z': None,
         'Z': None,
         '?': False,
+        'v': 0,
 }
 
 if sys.platform == 'win32':
     TP_TO_DEFAULT['X'] = NULL
-    TP_TO_DEFAULT['v'] = 0
 
 DEFAULT_VALUE = object()
 
@@ -70,13 +70,13 @@ def swap_bytes(value, sizeof, typeof, get_or_set):
                ((value >> 24) & 0xFF)
 
     def swap_8():
-        return ((value & 0x00000000000000FFL) << 56) | \
-               ((value & 0x000000000000FF00L) << 40) | \
-               ((value & 0x0000000000FF0000L) << 24) | \
-               ((value & 0x00000000FF000000L) << 8) | \
-               ((value & 0x000000FF00000000L) >> 8) | \
-               ((value & 0x0000FF0000000000L) >> 24) | \
-               ((value & 0x00FF000000000000L) >> 40) | \
+        return ((value & 0x00000000000000FF) << 56) | \
+               ((value & 0x000000000000FF00) << 40) | \
+               ((value & 0x0000000000FF0000) << 24) | \
+               ((value & 0x00000000FF000000) << 8) | \
+               ((value & 0x000000FF00000000) >> 8) | \
+               ((value & 0x0000FF0000000000) >> 24) | \
+               ((value & 0x00FF000000000000) >> 40) | \
                ((value >> 56) & 0xFF)
 
     def swap_double_float(typ):
@@ -110,7 +110,7 @@ def swap_bytes(value, sizeof, typeof, get_or_set):
 def generic_xxx_p_from_param(cls, value):
     if value is None:
         return cls(None)
-    if isinstance(value, basestring):
+    if isinstance(value, (str, bytes)):
         return cls(value)
     if isinstance(value, _SimpleCData) and \
            type(value)._type_ in 'zZP':
@@ -137,7 +137,7 @@ def from_param_void_p(cls, value):
         return value
     if isinstance(value, (_Pointer, CFuncPtr)):
         return cls.from_address(value._buffer.buffer)
-    if isinstance(value, (int, long)):
+    if isinstance(value, int):
         return cls(value)
 
 FROM_PARAM_BY_TYPE = {
@@ -193,10 +193,7 @@ class SimpleType(_CDataMeta):
                     return _rawffi.charp2string(addr)
 
             def _setvalue(self, value):
-                if isinstance(value, basestring):
-                    if isinstance(value, unicode):
-                        value = value.encode(ConvMode.encoding,
-                                             ConvMode.errors)
+                if isinstance(value, bytes):
                     #self._objects = value
                     array = _rawffi.Array('c')(len(value)+1, value)
                     self._objects = CArgObject(value, array)
@@ -217,10 +214,7 @@ class SimpleType(_CDataMeta):
                     return _rawffi.wcharp2unicode(addr)
 
             def _setvalue(self, value):
-                if isinstance(value, basestring):
-                    if isinstance(value, str):
-                        value = value.decode(ConvMode.encoding,
-                                             ConvMode.errors)
+                if isinstance(value, str):
                     #self._objects = value
                     array = _rawffi.Array('u')(len(value)+1, value)
                     self._objects = CArgObject(value, array)
@@ -241,7 +235,7 @@ class SimpleType(_CDataMeta):
                 return addr
 
             def _setvalue(self, value):
-                if isinstance(value, str):
+                if isinstance(value, bytes):
                     array = _rawffi.Array('c')(len(value)+1, value)
                     self._objects = CArgObject(value, array)
                     value = array.buffer
@@ -252,9 +246,6 @@ class SimpleType(_CDataMeta):
 
         elif tp == 'u':
             def _setvalue(self, val):
-                if isinstance(val, str):
-                    val = val.decode(ConvMode.encoding, ConvMode.errors)
-                # possible if we use 'ignore'
                 if val:
                     self._buffer[0] = val
             def _getvalue(self):
@@ -263,8 +254,6 @@ class SimpleType(_CDataMeta):
 
         elif tp == 'c':
             def _setvalue(self, val):
-                if isinstance(val, unicode):
-                    val = val.encode(ConvMode.encoding, ConvMode.errors)
                 if val:
                     self._buffer[0] = val
             def _getvalue(self):
@@ -308,8 +297,8 @@ class SimpleType(_CDataMeta):
                     return _rawffi.wcharp2rawunicode(addr, size)
 
             def _setvalue(self, value):
-                if isinstance(value, basestring):
-                    if isinstance(value, str):
+                if isinstance(value, (str, bytes)):
+                    if isinstance(value, bytes):
                         value = value.decode(ConvMode.encoding,
                                              ConvMode.errors)
                     array = _rawffi.Array('u')(len(value)+1, value)
@@ -410,8 +399,7 @@ class SimpleType(_CDataMeta):
     def _getformat(self):
         return self._format
 
-class _SimpleCData(_CData):
-    __metaclass__ = SimpleType
+class _SimpleCData(_CData, metaclass=SimpleType):
     _type_ = 'abstract'
 
     def __init__(self, value=DEFAULT_VALUE):
@@ -450,5 +438,5 @@ class _SimpleCData(_CData):
             return "<%s object at 0x%x>" % (type(self).__name__,
                                             id(self))
 
-    def __nonzero__(self):
-        return self._buffer[0] not in (0, '\x00')
+    def __bool__(self):
+        return self._buffer[0] not in (0, b'\x00')

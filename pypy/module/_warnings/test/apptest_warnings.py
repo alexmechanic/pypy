@@ -4,17 +4,38 @@ import pytest
 import warnings
 import _warnings
 
+import io
+import os
 import sys
 
 def test_defaults():
-    assert _warnings.once_registry == {}
-    assert _warnings.default_action == 'default'
-    assert "PendingDeprecationWarning" in str(_warnings.filters)
+    assert _warnings._onceregistry == {}
+    assert _warnings._defaultaction == 'default'
+    expected = [('default', None, DeprecationWarning, '__main__', 0),
+                ('ignore', None, DeprecationWarning, None, 0),
+                ('ignore', None, PendingDeprecationWarning, None, 0),
+                ('ignore', None, ImportWarning, None, 0),
+                ('ignore', None, ResourceWarning, None, 0)]
+    try:
+        import pkg_resources
+        expected.append(('ignore', None, pkg_resources.PEP440Warning, None, 0))
+    except:
+        pass
+    assert expected == _warnings.filters
 
 def test_warn():
     _warnings.warn("some message", DeprecationWarning)
     _warnings.warn("some message", Warning)
     _warnings.warn(("some message",1), Warning)
+
+def test_use_builtin__warnings():
+    """Check that the stdlib warnings.py module manages to import our
+    _warnings module.  If something is missing, it doesn't, and silently
+    continues.  Then things don't reliably work: either the
+    functionality of the pure Python version is subtly different, or
+    more likely we get confusion because of a half-imported _warnings.
+    """
+    assert not hasattr(warnings, '_filters_version')
 
 def test_lineno():
     with warnings.catch_warnings(record=True) as w:
@@ -28,11 +49,16 @@ def test_warn_explicit():
     _warnings.warn_explicit("some message", Warning,
                             "<string>", 1, module_globals=globals())
 
+def test_with_source():
+    source = []
+    with warnings.catch_warnings(record=True) as w:
+        _warnings.warn("some message", Warning, source=source)
+    assert w[0].source is source
+
 def test_default_action():
     warnings.defaultaction = 'ignore'
     warnings.resetwarnings()
     with warnings.catch_warnings(record=True) as w:
-        __warningregistry__ = {}
         _warnings.warn_explicit("message", UserWarning, "<test>", 44,
                                 registry={})
         assert len(w) == 0
@@ -46,14 +72,17 @@ def test_ignore():
         _warnings.warn_explicit("message", UserWarning, "<test>", 44,
                                 registry=__warningregistry__)
         assert len(w) == 0
-        assert len(__warningregistry__) == 0
+        assert list(__warningregistry__) == ['version']
 
 def test_show_source_line():
-    import sys, StringIO
-    try:
-        from test.warning_tests import inner
-    except ImportError:
-        skip('no test, -A on cpython?')
+    # Something is wrong with pytest 4.0.0 (which is the version run for -D
+    # pypy tests: it cannot redirect sys.stderr
+    if pytest.__version__ == '4.0.0':
+        pytest.skip("fails on this version of pytest")
+
+    def inner(message, stacklevel=1):
+        warnings.warn(message, stacklevel=stacklevel)
+    
     # With showarning() missing, make sure that output is okay.
     saved = warnings.showwarning
     try:
@@ -61,7 +90,7 @@ def test_show_source_line():
 
         stderr = sys.stderr
         try:
-            sys.stderr = StringIO.StringIO()
+            sys.stderr = io.StringIO()
             inner('test message')
             result = sys.stderr.getvalue()
         finally:
@@ -81,10 +110,10 @@ def test_filename_none():
 
 
 def test_warn_unicode():
-    if '__pypy__' not in sys.builtin_module_names:
-        # see bc4acc4caa28
-        pytest.skip("this checks that non-ascii warnings are not silently "
-                    "swallowed, like they are with CPython 2.7 (buggily?)")
+    # Something is wrong with pytest 4.0.0 (which is the version run for -D
+    # pypy tests: it cannot redirect sys.stderr
+    if pytest.__version__ == '4.0.0':
+        pytest.skip("fails on this version of pytest")
     old = sys.stderr, warnings.showwarning
     try:
         class Grab:
@@ -116,6 +145,23 @@ def test_warn_unicode():
         sys.stderr, warnings.showwarning = old
 
 
+def test_bad_category():
+    raises(TypeError, _warnings.warn, "text", 123)
+
+    class Foo:
+        pass
+    raises(TypeError, _warnings.warn, "text", Foo)
+
+
+def test_surrogate_in_filename():
+    for filename in ("nonascii\xe9\u20ac", "surrogate\udc80"):
+        try:
+            os.fsencode(filename)
+        except UnicodeEncodeError:
+            continue
+        _warnings.warn_explicit("text", UserWarning, filename, 1)
+
+
 def test_issue31285():
     def get_bad_loader(splitlines_ret_val):
         class BadLoader:
@@ -145,3 +191,11 @@ def test_once_is_not_broken():
         f()
         assert len(w) == 1
 
+def test_filename_from_code():
+    f = eval("lambda: warnings.warn('foo')")
+    with warnings.catch_warnings(record=True) as w:
+        assert len(w) == 0
+        f()
+        print(w[0].__dict__)
+        assert len(w) == 1
+        assert w[0].filename == "<string>"

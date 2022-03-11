@@ -16,16 +16,14 @@ def test_basic():
         assert 'root' in g.gr_mem or g.gr_mem == []
         assert g.gr_name == name
         assert isinstance(g.gr_passwd, str)    # usually just 'x', don't hope :-)
-        g2 = grp.getgrnam(unicode(name))
-        assert g2 == g
         break
     else:
         raise
 
 def test_extra():
-    with pytest.raises(KeyError):
+    with pytest.raises(TypeError):
         grp.getgrnam(False)
-    with pytest.raises(KeyError):
+    with pytest.raises(TypeError):
         grp.getgrnam(None)
 
 def test_struct_group():

@@ -21,6 +21,7 @@ PyObject *make_object_base_type(void) {
 
     PyTypeObject *type = &heap_type->ht_type;
     if (!heap_type) return NULL;
+    heap_type->ht_name = PyUnicode_FromString(name);
     type->tp_name = name;
 #ifdef ISSUE_2482
     type->tp_base = &PyBaseObject_Type; /*fails */
@@ -96,15 +97,19 @@ initissue2482(void)
 
     type = &heap_type->ht_type;
     type->tp_name = name;
+    heap_type->ht_name = PyUnicode_FromString(name);
 
     base = make_object_base_type();
     if (! base) INITERROR;
     Py_INCREF(base);
     type->tp_base = (PyTypeObject *) base;
     type->tp_basicsize = ((PyTypeObject *) base)->tp_basicsize;
-    type->tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HEAPTYPE | Py_TPFLAGS_CHECKTYPES;
+    type->tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HEAPTYPE;
 
     if (PyType_Ready(type) < 0) INITERROR;
 
     PyModule_AddObject(module, name, (PyObject *) type);
+#if PY_MAJOR_VERSION >= 3
+    return module;
+#endif
 };

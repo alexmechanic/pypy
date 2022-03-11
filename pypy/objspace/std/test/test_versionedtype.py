@@ -1,4 +1,6 @@
 from pypy.objspace.std.test import test_typeobject
+from pypy.objspace.std.longobject import W_LongObject
+from rpython.rlib.rbigint import rbigint
 
 class TestVersionedType(test_typeobject.TestTypeObject):
 
@@ -26,7 +28,9 @@ class TestVersionedType(test_typeobject.TestTypeObject):
         btag = w_B.version_tag()
         assert atag is not None
         assert btag is not None
-        assert w_C.version_tag() is None
+        # the following assert is true only in py2 because C is an old-style
+        #class
+        # assert w_C.version_tag() is None
         assert atag is not btag
         w_types = space.appexec([w_A, w_B], """(A, B):
             B.g = lambda self: None
@@ -142,39 +146,6 @@ class TestVersionedType(test_typeobject.TestTypeObject):
         assert w_MODULE.version_tag() is not None
         assert w_OBJECT.version_tag() is not None
 
-    def test_version_tag_mixes_oldnew(self):
-        space = self.space
-        w_types = space.appexec([], """():
-        class A:
-            pass
-
-        class B(A, object):
-            pass
-
-        return A, B
-        """)
-        w_A, w_B = space.unpackiterable(w_types)
-        oldtag = w_B.version_tag()
-        space.setattr(w_A, space.wrap("x"), space.w_None)
-        newtag = w_B.version_tag()
-        if oldtag is not None:
-            assert newtag != oldtag
-
-        w_types = space.appexec([], """():
-        class A:
-            pass
-        class B(object):
-            pass
-
-        return A, B
-        """)
-        w_A, w_B = space.unpackiterable(w_types)
-        oldtag = w_B.version_tag()
-        assert oldtag is not None
-        space.setattr(w_B, space.wrap("__bases__"), space.newtuple([w_A, space.w_object]))
-        newtag = w_B.version_tag()
-        assert newtag is None
-
     def test_version_tag_of_modules(self):
         space = self.space
         w_mod = space.appexec([], """():
@@ -258,5 +229,27 @@ class TestVersionedType(test_typeobject.TestTypeObject):
         cell = w_A._getdictvalue_no_unwrapping(space, "x")
         assert space.float_w(cell.w_value) == 2.2
 
+    def test_integer_strategy_with_w_long(self):
+        space = self.space
+        w_x = space.wrap("x")
+        w_A, w_B, w_C = self.get_three_classes()
+        atag = w_A.version_tag()
+        w = W_LongObject(rbigint.fromlong(42))
+        space.setattr(w_A, w_x, w)
+        assert w_A.version_tag() is not atag
+        assert space.int_w(space.getattr(w_A, w_x)) == 42
 
+        atag = w_A.version_tag()
+        w = W_LongObject(rbigint.fromlong(43))
+        space.setattr(w_A, w_x, w)
+        assert w_A.version_tag() is not atag
+        assert space.int_w(space.getattr(w_A, w_x)) == 43
+        cell = w_A._getdictvalue_no_unwrapping(space, "x")
+        assert cell.intvalue == 43
 
+        atag = w_A.version_tag()
+        w = W_LongObject(rbigint.fromlong(44))
+        space.setattr(w_A, w_x, w)
+        assert w_A.version_tag() is atag
+        assert space.int_w(space.getattr(w_A, w_x)) == 44
+        assert cell.intvalue == 44

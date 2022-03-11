@@ -10,6 +10,7 @@ from rpython.rtyper.lltypesystem import lltype
 from rpython.rtyper.lltypesystem import rffi
 
 
+# from pystrtod.h
 # PyOS_double_to_string's "type", if non-NULL, will be set to one of:
 Py_DTST_FINITE = 0
 Py_DTST_INFINITE = 1
@@ -60,9 +61,14 @@ def PyOS_string_to_double(space, s, endptr, w_overflow_exception):
             endptr = lltype.malloc(rffi.CCHARPP.TO, 1, flavor='raw')
             user_endptr = False
         result = rdtoa.dg_strtod(s, endptr)
-        endpos = (rffi.cast(rffi.LONG, endptr[0]) -
-                  rffi.cast(rffi.LONG, s))
-        if endpos == 0 or (not user_endptr and not endptr[0][0] == '\0'):
+        endpos = (rffi.cast(lltype.Signed, endptr[0]) -
+                  rffi.cast(lltype.Signed, s))
+        if endpos != 0 and not user_endptr and endptr[0][0] != '\0':
+            # Not all of s was converted
+            raise oefmt(space.w_ValueError,
+                        "could not convert string to float: '%s'",
+                        rffi.constcharp2str(s))
+        elif endpos == 0:
             low = rffi.constcharp2str(s).lower()
             sz = 0
             if len(low) < 3:
@@ -99,6 +105,11 @@ def PyOS_string_to_double(space, s, endptr, w_overflow_exception):
             # result is set to 0.0 for a parse_error in dtoa.c
             # if it changed, we must have sucessfully converted
             if result != 0.0:
+                if not user_endptr and sz != len(low):
+                    # Not all of s was converted
+                    raise oefmt(space.w_ValueError,
+                                "could not convert string to float: '%s'",
+                                rffi.constcharp2str(s))
                 if endptr:
                     endptr[0] = rffi.cast(rffi.CCHARP, rffi.ptradd(s, sz))
                 return result
@@ -106,13 +117,13 @@ def PyOS_string_to_double(space, s, endptr, w_overflow_exception):
                         "invalid input at position %d", endpos)
         err = rffi.cast(lltype.Signed, rposix._get_errno())
         if err == errno.ERANGE:
-            rposix._set_errno(rffi.cast(rffi.INT, 0))
             if w_overflow_exception is None:
                 if result > 0:
                     return rfloat.INFINITY
                 else:
                     return -rfloat.INFINITY
             else:
+                rposix._set_errno(rffi.cast(rffi.INT, 0))
                 raise oefmt(w_overflow_exception, "value too large")
         return result
     finally:

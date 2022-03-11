@@ -6,8 +6,8 @@ from pypy.interpreter.gateway import interp2app, unwrap_spec
 from pypy.interpreter.baseobjspace import W_Root
 from pypy.interpreter.error import OperationError, oefmt
 from pypy.interpreter.typedef import TypeDef, interp_attrproperty
-from rpython.rlib.rarithmetic import r_longlong
-from rpython.rlib.unicodedata import unicodedb_5_2_0, unicodedb_3_2_0
+from rpython.rlib.rarithmetic import r_longlong, r_uint
+from rpython.rlib.unicodedata import unicodedb_13_0_0, unicodedb_3_2_0
 from rpython.rlib.rutf8 import Utf8StringBuilder, unichr_as_utf8
 
 
@@ -43,7 +43,8 @@ def unichr_to_code_w(space, w_unichr):
 class UCD(W_Root):
     def __init__(self, unicodedb):
         self._unicodedb = unicodedb
-        self._lookup = unicodedb.lookup
+        self._lookup = unicodedb.lookup_with_alias
+        self._lookup_named_sequence = unicodedb.lookup_named_sequence
         self._name = unicodedb.name
         self._decimal = unicodedb.decimal
         self._digit = unicodedb.digit
@@ -72,12 +73,18 @@ class UCD(W_Root):
     @unwrap_spec(name='text')
     def lookup(self, space, name):
         try:
-            code = self._lookup(name.upper())
+            code = self._lookup(name.upper(), with_named_sequence=True)
         except KeyError:
             msg = space.mod(space.newtext("undefined character name '%s'"), space.newtext(name))
             raise OperationError(space.w_KeyError, msg)
-        assert code >= 0
-        return space.newutf8(unichr_as_utf8(code), 1)
+
+        # The code may be a named sequence
+        sequence = self._lookup_named_sequence(code)
+        if sequence is not None:
+            # named sequences only contain UCS2 codes, no surrogates &co.
+            return space.newutf8(sequence.encode('utf-8'), len(sequence))
+
+        return space.newutf8(unichr_as_utf8(r_uint(code)), 1)
 
     def name(self, space, w_unichr, w_default=None):
         code = unichr_to_code_w(space, w_unichr)
@@ -279,6 +286,11 @@ class UCD(W_Root):
 
         return self.build(space, result, stop=next_insert)
 
+    @unwrap_spec(form='text')
+    def is_normalized(self, space, form, w_uni):
+        # XXX inefficient!
+        return space.eq(self.normalize(space, form, w_uni), w_uni)
+
     def build(self, space, r, stop):
         builder = Utf8StringBuilder(stop * 3)
         for i in range(stop):
@@ -290,6 +302,7 @@ methods = {}
 for methodname in """
         _get_code lookup name decimal digit numeric category east_asian_width
         bidirectional combining mirrored decomposition normalize
+        is_normalized
         """.split():
     methods[methodname] = interp2app(getattr(UCD, methodname))
 
@@ -301,8 +314,8 @@ UCD.typedef = TypeDef("unicodedata.UCD",
                       **methods)
 
 ucd_3_2_0 = UCD(unicodedb_3_2_0)
-ucd_5_2_0 = UCD(unicodedb_5_2_0)
-ucd = ucd_5_2_0
+ucd_13_0_0 = UCD(unicodedb_13_0_0)
+ucd = ucd_13_0_0
 
 # This is the default unicodedb used in various places:
 # - the unicode type

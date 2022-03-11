@@ -1,47 +1,10 @@
 from pypy.interpreter.error import OperationError
-from pypy.interpreter.gateway import app2interp_temp
-from pypy.interpreter.argument import Arguments
-from pypy.interpreter.pycode import PyCode
-from pypy.tool.pytest.appsupport import (AppFrame, build_pytest_assertion,
-    AppExceptionInfo, interpret)
+from pypy.tool.pytest.appsupport import AppExceptionInfo
 import py
-from rpython.tool.udir import udir
-import os
-import sys
 import pypy
 conftestpath = py.path.local(pypy.__file__).dirpath("conftest.py")
 
 pytest_plugins = "pytester"
-
-def somefunc(x):
-    print x
-
-def test_AppFrame(space):
-    import sys
-    co = PyCode._from_code(space, somefunc.func_code)
-    pyframe = space.FrameClass(space, co, space.newdict(), None)
-    runner = AppFrame(space, pyframe)
-    interpret("f = lambda x: x+1", runner, should_fail=False)
-    msg = interpret("assert isinstance(f(2), float)", runner)
-    assert msg.startswith("assert isinstance(3, float)\n"
-                          " +  where 3 = ")
-
-
-def test_myexception(space):
-    def app_test_func():
-        x = 6*7
-        assert x == 43
-    t = app2interp_temp(app_test_func)
-    f = t.get_function(space)
-    space.setitem(space.builtin.w_dict, space.wrap('AssertionError'),
-                  build_pytest_assertion(space))
-    try:
-        f.call_args(Arguments(None, []))
-    except OperationError as e:
-        assert e.match(space, space.w_AssertionError)
-        assert space.unwrap(space.str(e.get_w_value(space))) == 'assert 42 == 43'
-    else:
-        assert False, "got no exception!"
 
 def test_appexecinfo(space):
     try:
@@ -92,7 +55,7 @@ class AppTestWithWrappedInterplevelAttributes:
 def test_app_test_blow(testdir):
     conftestpath.copy(testdir.tmpdir)
     sorter = testdir.inline_runsource("""class AppTestBlow:
-    def test_one(self): exec 'blow'
+    def test_one(self): exec('blow')
     """)
 
     reports = sorter.getreports("pytest_runtest_logreport")

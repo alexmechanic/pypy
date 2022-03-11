@@ -14,10 +14,6 @@ on flush.
 
 Fix calling copy on already-flushed compressobjs.
 
-.. branch: zlib-copying
-
-The zlib module's compressobj and decompressobj now expose copy methods
-as they do on CPython.
 
 
 .. branch: math-improvements

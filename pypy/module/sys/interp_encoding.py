@@ -7,38 +7,23 @@ def getdefaultencoding(space):
 implementation."""
     return space.newtext(space.sys.defaultencoding)
 
-def setdefaultencoding(space, w_encoding):
-    """Set the current default string encoding used by the Unicode
-implementation."""
-    encoding = space.text_w(w_encoding)
-    mod = space.getbuiltinmodule("_codecs")
-    w_lookup = space.getattr(mod, space.newtext("lookup"))
-    # check whether the encoding is there
-    space.call_function(w_lookup, w_encoding)
-    space.sys.w_default_encoder = None
-    space.sys.defaultencoding = encoding
-
-def get_w_default_encoder(space):
-    assert not (space.config.translating and not we_are_translated()), \
-        "get_w_default_encoder() should not be called during translation"
-    w_encoding = space.newtext(space.sys.defaultencoding)
-    mod = space.getbuiltinmodule("_codecs")
-    w_lookup = space.getattr(mod, space.newtext("lookup"))
-    w_functuple = space.call_function(w_lookup, w_encoding)
-    w_encoder = space.getitem(w_functuple, space.newint(0))
-    space.sys.w_default_encoder = w_encoder    # cache it
-    return w_encoder
-
 if sys.platform == "win32":
-    base_encoding = "mbcs"
+    base_encoding = "utf-8"
+    base_error = "strict"
 elif sys.platform == "darwin":
     base_encoding = "utf-8"
+    base_error = "surrogateescape"
+elif sys.platform == "linux2":
+    base_encoding = "utf-8"
+    base_error = "surrogateescape"
 else:
     # In CPython, the default base encoding is NULL. This is paired with a
     # comment that says "If non-NULL, this is different than the default
     # encoding for strings". Therefore, the default filesystem encoding is the
-    # default encoding for strings, which is ASCII.
-    base_encoding = "ascii"
+    # default encoding for strings, which is dependent on locale. We assume
+    # utf-8.
+    base_encoding = "utf-8"
+    base_error = "surrogateescape"
 
 def _getfilesystemencoding(space):
     encoding = base_encoding
@@ -53,7 +38,8 @@ def _getfilesystemencoding(space):
                     w_res = space.call_method(codecmod, 'lookup',
                                               space.newtext(loc_codeset))
                     if space.is_true(w_res):
-                        encoding = loc_codeset
+                        w_name = space.getattr(w_res, space.newtext('name'))
+                        encoding = space.text_w(w_name)
             finally:
                 rlocale.setlocale(rlocale.LC_CTYPE, oldlocale)
         except rlocale.LocaleError:
@@ -65,5 +51,9 @@ def getfilesystemencoding(space):
     operating system filenames.
     """
     if space.sys.filesystemencoding is None:
-        space.sys.filesystemencoding = _getfilesystemencoding(space)
+        return space.newtext(base_encoding)
     return space.newtext(space.sys.filesystemencoding)
+
+
+def getfilesystemencodeerrors(space):
+    return space.newtext(base_error)

@@ -1,4 +1,6 @@
+from rpython.rlib.rstruct.error import StructError
 from rpython.rlib.buffer import StringBuffer, SubBuffer, RawBuffer
+from rpython.rlib.mutbuffer import MutableStringBuffer
 
 from pypy.interpreter.error import oefmt
 
@@ -8,7 +10,7 @@ class BufferInterfaceNotFound(Exception):
 
 class BufferView(object):
     """Abstract base class for buffers."""
-    _attrs_ = ['readonly']
+    _attrs_ = ['readonly', 'w_obj']
     _immutable_ = True
 
     def getlength(self):
@@ -68,6 +70,19 @@ class BufferView(object):
         fmtiter.interpret(self.getformat())
         return fmtiter.result_w[0]
 
+    def bytes_from_value(self, space, w_val):
+        from pypy.module.struct.formatiterator import PackFormatIterator
+        itemsize = self.getitemsize()
+        buf = MutableStringBuffer(itemsize)
+        fmtiter = PackFormatIterator(space, buf, [w_val])
+        try:
+            fmtiter.interpret(self.getformat())
+        except StructError as e:
+            raise oefmt(space.w_TypeError,
+                        "memoryview: invalid type for format '%s'",
+                        self.getformat())
+        return buf.finish()
+
     def _copy_buffer(self):
         if self.getndim() == 0:
             itemsize = self.getitemsize()
@@ -123,10 +138,16 @@ class BufferView(object):
         itemsize = self.getitemsize()
         # TODO: this probably isn't very fast
         data = self.getbytes(offset, itemsize)
-        return space.newbytes(data)
+        return self.value_from_bytes(space, data)
 
     def new_slice(self, start, step, slicelength):
-        return BufferSlice(self, start, step, slicelength)
+        return BufferSlice(self, start, step, slicelength, w_obj=self.w_obj)
+
+    def setitem_w(self, space, idx, w_obj):
+        offset = self.get_offset(space, 0, idx)
+        # TODO: this probably isn't very fast
+        byteval = self.bytes_from_value(space, w_obj)
+        self.setbytes(offset, byteval)
 
     def w_tolist(self, space):
         dim = self.getndim()
@@ -134,7 +155,7 @@ class BufferView(object):
             raise NotImplementedError
         elif dim == 1:
             n = self.getshape()[0]
-            values_w = [space.ord(self.w_getitem(space, i)) for i in range(n)]
+            values_w = [self.w_getitem(space, i) for i in range(n)]
             return space.newlist(values_w)
         else:
             return self._tolist_rec(space, 0, 0)
@@ -199,12 +220,13 @@ class RawBufferView(RawBufferView_Base):
     _attrs_ = ['readonly', 'data', 'fmt', 'itemsize']
     _immutable_ = True
 
-    def __init__(self, data, fmt, itemsize):
+    def __init__(self, data, fmt, itemsize, w_obj=None):
         assert isinstance(data, RawBuffer)
         self.data = data
         self.readonly = data.readonly
         self.fmt = fmt
         self.itemsize = itemsize
+        self.w_obj = w_obj
 
     def getformat(self):
         return self.fmt
@@ -225,7 +247,7 @@ class RawBufferView(RawBufferView_Base):
         if step == 1:
             n = self.itemsize
             newbuf = SubBuffer(self.data, start * n, slicelength * n)
-            return RawBufferView(newbuf, self.fmt, self.itemsize)
+            return RawBufferView(newbuf, self.fmt, self.itemsize, w_obj=self.w_obj)
         else:
             return BufferView.new_slice(self, start, step, slicelength)
 
@@ -234,9 +256,10 @@ class SimpleView(RawBufferView_Base):
     _attrs_ = ['readonly', 'data']
     _immutable_ = True
 
-    def __init__(self, data):
+    def __init__(self, data, w_obj=None):
         self.data = data
         self.readonly = self.data.readonly
+        self.w_obj = w_obj
 
     def getformat(self):
         return 'B'
@@ -267,20 +290,25 @@ class SimpleView(RawBufferView_Base):
     def w_getitem(self, space, idx):
         idx = self.get_offset(space, 0, idx)
         ch = self.data[idx]
-        return space.newbytes(ch)
+        return space.newint(ord(ch))
 
     def new_slice(self, start, step, slicelength):
         if step == 1:
-            return SimpleView(SubBuffer(self.data, start, slicelength))
+            return SimpleView(SubBuffer(self.data, start, slicelength), w_obj=self.w_obj)
         else:
-            return BufferSlice(self, start, step, slicelength)
+            return BufferSlice(self, start, step, slicelength, w_obj=self.w_obj)
+
+    def setitem_w(self, space, idx, w_obj):
+        idx = self.get_offset(space, 0, idx)
+        self.data[idx] = space.byte_w(w_obj)
 
 
 class BufferSlice(BufferView):
     _immutable_ = True
     _attrs_ = ['parent', 'readonly', 'shape', 'strides', 'start', 'step']
 
-    def __init__(self, parent, start, step, length):
+    def __init__(self, parent, start, step, length, w_obj=None):
+        self.w_obj = w_obj
         self.parent = parent
         self.readonly = self.parent.readonly
         self.strides = parent.getstrides()[:]
@@ -334,3 +362,60 @@ class BufferSlice(BufferView):
         real_start = start + self.start
         real_step = self.step * step
         return BufferSlice(self.parent, real_start, real_step, slicelength)
+
+    def setitem_w(self, space, idx, w_obj):
+        return self.parent.setitem_w(space, self.parent_index(idx), w_obj)
+
+
+# XXX not sure this is the right approach, maybe adding a copy to BufferView or
+# even a toreadonly would be a better approach
+
+class ReadonlyWrapper(BufferView):
+    _immutable_ = True
+    def __init__(self, view):
+        self.view = view
+        self.readonly = True
+        self.w_obj = view.w_obj
+
+    def getlength(self):
+        return self.view.getlength()
+
+    def as_str(self):
+        return self.view.as_str()
+
+    def getbytes(self, start, size):
+        return self.view.getbytes(start, size)
+
+    def setbytes(self, start, string):
+        assert 0, "should be unreachable"
+
+    def get_raw_address(self):
+        return self.view.get_raw_address()
+
+    def as_readbuf(self):
+        return self.view.as_readbuf()
+
+    def as_writebuf(self):
+        return self.view.as_writebuf()
+
+    def getformat(self):
+        return self.view.getformat()
+
+    def getitemsize(self):
+        return self.view.getitemsize()
+
+    def getndim(self):
+        return self.view.getndim()
+
+    def getshape(self):
+        return self.view.getshape()
+
+    def getstrides(self):
+        return self.view.getstrides()
+
+    def releasebuffer(self):
+        return self.view.releasebuffer()
+
+    def new_slice(self, start, step, slicelength):
+        return ReadonlyWrapper(BufferSlice(self, start, step, slicelength, w_obj=self.w_obj))
+

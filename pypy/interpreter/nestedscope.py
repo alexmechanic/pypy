@@ -19,9 +19,9 @@ class Cell(W_Root):
         if jit.isconstant(self):
             # ever_mutated is False if we never see a transition from not-None to
             # not-None. That means _elidable_get might return an out-of-date
-            # None, and by now the cell was to, with a not-None. So if we see a
-            # None, we don't return that and instead read self.w_value in the
-            # code below.
+            # None, and by now the cell was written to, with a not-None. So if
+            # we see a None, we don't return that and instead read self.w_value
+            # in the code below.
             if not self.family.ever_mutated:
                 w_res = self._elidable_get()
                 if w_res is not None:
@@ -29,6 +29,9 @@ class Cell(W_Root):
         if self.w_value is None:
             raise ValueError("get() from an empty cell")
         return self.w_value
+
+    def empty(self):
+        return self.w_value is None
 
     @jit.elidable
     def _elidable_get(self):
@@ -46,18 +49,24 @@ class Cell(W_Root):
             raise ValueError("delete() on an empty cell")
         self.w_value = None
 
-    def descr__cmp__(self, space, w_other):
+    def descr__lt__(self, space, w_other):
         if not isinstance(w_other, Cell):
             return space.w_NotImplemented
-
         if self.w_value is None:
+            # an empty cell is alway less than a non-empty one
             if w_other.w_value is None:
-                return space.newint(0)
-            return space.newint(-1)
+                return space.w_False
+            return space.w_True
         elif w_other.w_value is None:
-            return space.newint(1)
+            return space.w_False
+        return space.lt(self.w_value, w_other.w_value)
 
-        return space.cmp(self.w_value, w_other.w_value)
+    def descr__eq__(self, space, w_other):
+        if not isinstance(w_other, Cell):
+            return space.w_NotImplemented
+        if self.w_value is None or w_other.w_value is None:
+            return space.newbool(self.w_value == w_other.w_value)
+        return space.eq(self.w_value, w_other.w_value)
 
     def descr__reduce__(self, space):
         w_mod = space.getbuiltinmodule('_pickle_support')
@@ -96,9 +105,28 @@ class Cell(W_Root):
         except ValueError:
             raise oefmt(space.w_ValueError, "Cell is empty")
 
+    def descr_set_cell_contents(self, space, w_value):
+        return self.set(w_value)
+
+    def descr_del_cell_contents(self, space):
+        try:
+            return self.delete()
+        except ValueError:
+            pass # CPython ignores it
+
+
+def descr_new_cell(space, w_type, w_obj=None):
+    """ Create and return a new cell. If an argument is given, it is used as
+    the cell_contents of the cell, otherwise the cell is empty. """
+    return Cell(w_obj, DUMMY_FAMILY)
+
+
 class CellFamily(object):
     _immutable_fields_ = ['ever_mutated?']
 
     def __init__(self, name):
         self.name = name
         self.ever_mutated = False
+
+DUMMY_FAMILY = CellFamily("<dummy>")
+DUMMY_FAMILY.ever_mutated = True

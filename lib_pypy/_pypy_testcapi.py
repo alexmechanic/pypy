@@ -1,5 +1,6 @@
 import os, sys, imp
 import tempfile, binascii
+import importlib.machinery
 
 
 def _get_hashed_filename(cfile):
@@ -7,7 +8,8 @@ def _get_hashed_filename(cfile):
         content = fid.read()
     # from cffi's Verifier()
     key = '\x00'.join([sys.version[:3], content])
-    key += 'cpyext-gc-support-2'   # this branch requires recompilation!
+    # change the key to force recompilation
+    key += '2017-11-21'
     if sys.version_info >= (3,):
         key = key.encode('utf-8')
     k1 = hex(binascii.crc32(key[0::2]) & 0xffffffff)
@@ -47,9 +49,8 @@ def get_hashed_dir(cfile):
 
 
 def _get_c_extension_suffix():
-    for ext, mod, typ in imp.get_suffixes():
-        if typ == imp.C_EXTENSION:
-            return ext
+    suffixes = importlib.machinery.EXTENSION_SUFFIXES
+    return suffixes[0] if suffixes else None
 
 
 def compile_shared(csource, modulename, output_dir):
@@ -60,34 +61,36 @@ def compile_shared(csource, modulename, output_dir):
     assert output_dir is not None
 
     from distutils.ccompiler import new_compiler
+    from distutils import log, sysconfig
+    log.set_verbosity(3)
 
     compiler = new_compiler()
     compiler.output_dir = output_dir
-
     # Compile .c file
-    include_dir = os.path.join(thisdir, '..', 'include')
+    include_dir = sysconfig.get_config_var('INCLUDEPY')
     if sys.platform == 'win32':
         ccflags = ['-D_CRT_SECURE_NO_WARNINGS']
     else:
         ccflags = ['-fPIC', '-Wimplicit-function-declaration']
+    sysconfig.customize_compiler(compiler)
     res = compiler.compile([os.path.join(thisdir, csource)],
                            include_dirs=[include_dir],
-                           extra_preargs=ccflags)
+                           extra_preargs=ccflags,
+                          )
     object_filename = res[0]
 
     # set link options
     output_filename = modulename + _get_c_extension_suffix()
     if sys.platform == 'win32':
-        # XXX pyconfig.h uses a pragma to link to the import library,
-        #     which is currently python27.lib
-        library = os.path.join(thisdir, '..', 'libs', 'python27')
+        libname = 'python{0[0]}{0[1]}'.format(sys.version_info)
+        library = os.path.join(thisdir, '..', 'libs', libname)
         if not os.path.exists(library + '.lib'):
             # For a local translation or nightly build
-            library = os.path.join(thisdir, '..', 'pypy', 'goal', 'python27')
-        assert os.path.exists(library + '.lib'),'Could not find import library "%s"' % library
+            library = os.path.join(thisdir, '..', 'pypy', 'goal', libname)
+        assert os.path.exists(library + '.lib'), 'Could not find import library "%s"' % library
         libraries = [library, 'oleaut32']
         extra_ldargs = ['/MANIFEST',  # needed for VC10
-                        '/EXPORT:init' + modulename]
+                        '/EXPORT:PyInit_' + modulename]
     else:
         libraries = []
         extra_ldargs = []
@@ -103,7 +106,7 @@ def compile_shared(csource, modulename, output_dir):
     # module in sys.modules
     fp, filename, description = imp.find_module(modulename, path=[output_dir])
     with fp:
-        imp.load_module(modulename, fp, filename, description)
+        mod = imp.load_module(modulename, fp, filename, description)
 
     # If everything went fine up to now, write the name of this new
     # directory to 'hashed_fn', for future processes (and to avoid a
@@ -115,3 +118,4 @@ def compile_shared(csource, modulename, output_dir):
             f.write(os.path.basename(output_dir))
     except IOError:
         pass
+    return mod

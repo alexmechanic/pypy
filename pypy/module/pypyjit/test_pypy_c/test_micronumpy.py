@@ -35,6 +35,7 @@ def align_check(input):
     """ % (input, mask)
 
 
+@py.test.mark.skipif(True, reason='no _numpypy on pypy3')
 class TestMicroNumPy(BaseTestPyPyC):
 
     arith_comb = [('+','float','float', 4*3427,   3427, 1.0,3.0),

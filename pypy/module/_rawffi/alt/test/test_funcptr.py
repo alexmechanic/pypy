@@ -88,20 +88,20 @@ class AppTestFFI(BaseAppTestFFI):
         pow = libm.getfunc('pow', [types.double, types.double], types.double)
         assert pow(2, 3) == 8
 
+    @py.test.mark.skipif("py.test.config.option.runappdirect")
     def test_getaddr(self):
         from _rawffi.alt import CDLL, types
         libm = CDLL(self.libm_name)
         pow = libm.getfunc('pow', [types.double, types.double], types.double)
         assert pow.getaddr() == self.pow_addr
 
+    @py.test.mark.skipif("py.test.config.option.runappdirect")
     def test_getaddressindll(self):
         import sys
         from _rawffi.alt import CDLL
         libm = CDLL(self.libm_name)
         pow_addr = libm.getaddressindll('pow')
-        fff = sys.maxint*2-1
-        if sys.platform == 'win32' or sys.platform == 'darwin':
-            fff = sys.maxint*2+1
+        fff = sys.maxsize*2-1
         assert pow_addr == self.pow_addr & fff
 
     def test_func_fromaddr(self):
@@ -124,7 +124,7 @@ class AppTestFFI(BaseAppTestFFI):
         libfoo = CDLL(self.libfoo_name)
         sum_xy = libfoo.getfunc('sum_xy', [types.sint, types.sint], types.sint)
         assert sum_xy(30, 12) == 42
-        assert sum_xy(sys.maxint*2, 0) == -2
+        assert sum_xy(sys.maxsize*2, 0) == -2
 
     def test_void_result(self):
         """
@@ -183,7 +183,7 @@ class AppTestFFI(BaseAppTestFFI):
                                         types.void)
         assert get_dummy() == 0
         ptr = get_dummy_ptr()
-        assert type(ptr) in (int, long)
+        assert type(ptr) is int
         ptr2 = MyPointerWrapper(ptr)
         set_val_to_ptr(ptr2, 123)
         assert get_dummy() == 123
@@ -262,7 +262,7 @@ class AppTestFFI(BaseAppTestFFI):
         #
         ptr = do_nothing(b'foobar')
         array = CharArray.fromaddress(ptr, 7)
-        assert list(array) == list('foobar\00')
+        assert bytes(array) == b'foobar\00'
         do_nothing.free_temp_buffers()
 
     def test_typed_pointer_args(self):
@@ -293,7 +293,7 @@ class AppTestFFI(BaseAppTestFFI):
         from _rawffi.alt import CDLL, types
         libfoo = CDLL(self.libfoo_name)
         is_null_ptr = libfoo.getfunc('is_null_ptr', [types.void_p], types.ulong)
-        assert not is_null_ptr(sys.maxint+1)
+        assert not is_null_ptr(sys.maxsize+1)
 
     def test_unsigned_long_args(self):
         """
@@ -304,16 +304,13 @@ class AppTestFFI(BaseAppTestFFI):
         """
         import sys
         from _rawffi.alt import CDLL, types
-        maxlong = sys.maxint
-        if sys.platform == 'win32':
-            maxlong = 2147483647
         libfoo = CDLL(self.libfoo_name)
         sum_xy = libfoo.getfunc('sum_xy_ul', [types.ulong, types.ulong],
                                 types.ulong)
-        assert sum_xy(maxlong, 12) == maxlong+12
-        assert sum_xy(maxlong+1, 12) == maxlong+13
+        assert sum_xy(sys.maxsize, 12) == sys.maxsize+12
+        assert sum_xy(sys.maxsize+1, 12) == sys.maxsize+13
         #
-        res = sum_xy(maxlong*2+3, 0)
+        res = sum_xy(sys.maxsize*2+3, 0)
         assert res == 1
 
     def test_unsigned_short_args(self):
@@ -401,8 +398,8 @@ class AppTestFFI(BaseAppTestFFI):
         libfoo = CDLL(self.libfoo_name)
         sum_xy = libfoo.getfunc('sum_xy_wc', [types.unichar, types.unichar],
                                 types.unichar)
-        res = sum_xy(unichr(1000), unichr(2000))
-        assert type(res) is unicode
+        res = sum_xy(chr(1000), chr(2000))
+        assert type(res) is str
         assert ord(res) == 3000
 
     def test_single_float_args(self):
@@ -573,7 +570,7 @@ class AppTestFFI(BaseAppTestFFI):
         from _rawffi.alt import CDLL, types
         libfoo = CDLL(self.libfoo_name)
         raises(AttributeError, "libfoo.getfunc('I_do_not_exist', [], types.void)")
-        if self.iswin32:
+        if self.iswin32 or self.iswin64:
             skip("unix specific")
         libnone = CDLL(None)
         raises(AttributeError, "libnone.getfunc('I_do_not_exist', [], types.void)")
@@ -588,7 +585,7 @@ class AppTestFFI(BaseAppTestFFI):
         try:
             pow(2, 3)
         except ValueError as e:
-            assert e.message.startswith('Procedure called with')
+            assert str(e).startswith('Procedure called with')
         else:
             assert 0, 'test must assert, wrong calling convention'
 
@@ -610,7 +607,7 @@ class AppTestFFI(BaseAppTestFFI):
         try:
             wrong_sleep(10)
         except ValueError as e:
-            assert e.message.startswith('Procedure called with')
+            assert str(e).startswith('Procedure called with')
         else:
             assert 0, 'test must assert, wrong calling convention'
 
@@ -627,7 +624,7 @@ class AppTestFFI(BaseAppTestFFI):
         try:
             wrong_pow(2, 3) == 8
         except ValueError as e:
-            assert e.message.startswith('Procedure called with')
+            assert str(e).startswith('Procedure called with')
         else:
             assert 0, 'test must assert, wrong calling convention'
 

@@ -29,8 +29,9 @@ VALID_PARAMFLAGS = (
     PARAMFLAG_FIN | PARAMFLAG_FLCID
 )
 
-WIN64 = sys.platform == 'win32' and sys.maxint == 2 ** 63 - 1
+WIN64 = sys.platform == 'win32' and sys.maxsize == 2**63 - 1
 
+CTYPES_MAX_ARGCOUNT = 1024
 
 def get_com_error(errcode, riid, pIunk):
     "Win32 specific: build a COM Error exception"
@@ -65,8 +66,7 @@ class CFuncPtrType(_CDataMeta):
         return 'X{}'
 
 
-class CFuncPtr(_CData):
-    __metaclass__ = CFuncPtrType
+class CFuncPtr(_CData, metaclass=CFuncPtrType):
 
     _argtypes_ = None
     _restype_ = None
@@ -217,7 +217,7 @@ class CFuncPtr(_CData):
         argument = argsl.pop(0)
 
         # Direct construction from raw address
-        if isinstance(argument, (int, long)) and not argsl:
+        if isinstance(argument, int) and not argsl:
             self._set_address(argument)
             restype = self._restype_
             if restype is None:
@@ -258,7 +258,7 @@ class CFuncPtr(_CData):
             return
 
         # A COM function call, by index
-        if (sys.platform == 'win32' and isinstance(argument, (int, long))
+        if (sys.platform == 'win32' and isinstance(argument, int)
             and argsl):
             ffiargs, ffires = self._ffishapes(self._argtypes_, self._restype_)
             self._com_index = argument + 0x1000
@@ -290,6 +290,8 @@ class CFuncPtr(_CData):
     def __call__(self, *args, **kwargs):
         argtypes = self._argtypes_
         if self.callable is not None:
+            if len(args) > CTYPES_MAX_ARGCOUNT:
+                raise ArgumentError("too many arguments (%s), maximum is %s" % (len(args), CTYPES_MAX_ARGCOUNT))
             if len(args) == len(argtypes):
                 pass
             elif self._flags_ & _rawffi.FUNCFLAG_CDECL:
@@ -318,13 +320,20 @@ class CFuncPtr(_CData):
                 except SystemExit as e:
                     handle_system_exit(e)
                     raise
-            except:
-                exc_info = sys.exc_info()
-                traceback.print_tb(exc_info[2], file=sys.stderr)
-                print >> sys.stderr, "%s: %s" % (exc_info[0].__name__, exc_info[1])
+            except Exception as e:
+                from __pypy__ import write_unraisable
+                write_unraisable('in calling ctypes callback function', e, self.callable) 
                 return 0
             if self._restype_ is not None:
-                return res
+                if self._restype_._ffishape_ == 'O':
+                    return res
+                try:
+                    return self._restype_(res).value
+                except Exception as e:
+                    from __pypy__ import write_unraisable
+                    write_unraisable(
+                        "on converting result of ctypes callback function",
+                        e, self.callable)
             return
 
         if argtypes is None:
@@ -398,7 +407,8 @@ class CFuncPtr(_CData):
     def _do_errcheck(self, result, args):
         # The 'errcheck' protocol
         if self._errcheck_:
-            v = self._errcheck_(result, self, tuple(args))
+            args = tuple(args)
+            v = self._errcheck_(result, self, args)
             # If the errcheck funtion failed, let it throw
             # If the errcheck function returned newargs unchanged,
             # continue normal processing.
@@ -476,13 +486,13 @@ class CFuncPtr(_CData):
         # jit trace of the normal case
         from ctypes import c_char_p, c_wchar_p, c_void_p, c_int
         #
-        if isinstance(arg, str):
+        if isinstance(arg, bytes):
             cobj = c_char_p(arg)
-        elif isinstance(arg, unicode):
+        elif isinstance(arg, str):
             cobj = c_wchar_p(arg)
         elif arg is None:
             cobj = c_void_p()
-        elif isinstance(arg, (int, long)):
+        elif isinstance(arg, int):
             cobj = c_int(arg)
         else:
             raise TypeError("Don't know how to handle %s" % (arg,))
@@ -661,7 +671,7 @@ class CFuncPtr(_CData):
 
         return retval
 
-    def __nonzero__(self):
+    def __bool__(self):
         return self._com_index is not None or bool(self._buffer[0])
 
     def __del__(self):

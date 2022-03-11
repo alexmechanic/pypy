@@ -1,4 +1,3 @@
-from __future__ import absolute_import
 import pytest
 import sys
 import marshal as cpy_marshal
@@ -12,11 +11,11 @@ scopefunc = func(42)
 
 SUBCLASSABLE = [
     42,
-    sys.maxint,
+    sys.maxsize,
     -1.25,
     2+5j,
-    42L,
-    -1234567890123456789012345678901234567890L,
+    42,
+    -1234567890123456789012345678901234567890,
     hello,   # not interned
     "hello",
     (),
@@ -38,8 +37,8 @@ TESTCASES = SUBCLASSABLE + [
     True,
     StopIteration,
     Ellipsis,
-    func.func_code,
-    scopefunc.func_code,
+    func.__code__,
+    scopefunc.__code__,
 ]
 
 

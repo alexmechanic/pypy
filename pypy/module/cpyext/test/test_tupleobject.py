@@ -152,7 +152,7 @@ class AppTestTuple(AppTestCpythonExtensionBase):
         module = self.import_extension('foo', [
             ("run", "METH_NOARGS",
              """
-                long prev;
+                Py_ssize_t prev;
                 PyObject *t = PyTuple_New(1);
                 prev = Py_True->ob_refcnt;
                 Py_INCREF(Py_True);
@@ -180,9 +180,9 @@ class AppTestTuple(AppTestCpythonExtensionBase):
         assert module.is_TupleLike(a) == 1
         assert isinstance(a, tuple)
         assert issubclass(type(a), tuple)
-        assert list(a) == range(100, 400, 100)
-        assert list(a) == range(100, 400, 100)
-        assert list(a) == range(100, 400, 100)
+        assert list(a) == list(range(100, 400, 100))
+        assert list(a) == list(range(100, 400, 100))
+        assert list(a) == list(range(100, 400, 100))
 
     def test_setitem(self):
         module = self.import_extension('foo', [
@@ -265,3 +265,5 @@ class AppTestTuple(AppTestCpythonExtensionBase):
         SZ = module.get_size()
         s = SZ((1, 2, 3))
         assert len(s) == 3
+        assert len(s) == 3
+

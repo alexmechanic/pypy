@@ -158,7 +158,7 @@ def build_co_revdb_linestarts(code):
         newline = 1
         while p + 1 < len(lnotab):
             byte_incr = ord(lnotab[p])
-            line_incr = ord(lnotab[p+1])
+            line_incr = ord(lnotab[p+1])   # signed (maybe negative) from py3.6
             if byte_incr:
                 if newline != 0:
                     bits[addr] = '\x00'
@@ -188,13 +188,18 @@ def build_co_revdb_linestarts(code):
 
 def get_final_lineno(code):
     lineno = code.co_firstlineno
+    largest_line_no = lineno
     lnotab = code.co_lnotab
     p = 1
     while p < len(lnotab):
         line_incr = ord(lnotab[p])
+        if line_incr > 0x7f:
+            line_incr -= 0x100
         lineno += line_incr
+        if lineno > largest_line_no:
+            largest_line_no = lineno
         p += 2
-    return lineno
+    return largest_line_no
 
 def find_line_starts(code):
     # RPython version of dis.findlinestarts()
@@ -212,6 +217,8 @@ def find_line_starts(code):
                 result.append((addr, lineno))
                 lastlineno = lineno
             addr += byte_incr
+        if line_incr > 0x7f:
+            line_incr -= 0x100
         lineno += line_incr
         p += 2
     if lineno != lastlineno:
@@ -332,6 +339,7 @@ def descr_set_softspace(space, revdb, w_newvalue):
 W_RevDBOutput.typedef = typedef.TypeDef(
     "revdb_output",
     write = gateway.interp2app(W_RevDBOutput.descr_write),
+    # XXX is 'softspace' still necessary in Python 3?
     softspace = typedef.GetSetProperty(descr_get_softspace,
                                        descr_set_softspace,
                                        cls=W_RevDBOutput),
@@ -531,19 +539,18 @@ def command_locals(cmd, extra):
             prepare_print_environment(space)
             space.appexec([space.sys,
                            frame.getdictscope()], """(sys, locals):
-                lst = locals.keys()
-                lst.sort()
-                print 'Locals:'
+                lst = sorted(locals.keys())
+                print('Locals:')
                 for key in lst:
                     try:
-                        print '    %s =' % key,
+                        print('    %s =' % key, end=' ', flush=True)
                         s = '%r' % locals[key]
                         if len(s) > 140:
                             s = s[:100] + '...' + s[-30:]
-                        print s
+                        print(s)
                     except:
                         exc, val, tb = sys.exc_info()
-                        print '!<%s: %r>' % (exc, val)
+                        print('!<%s: %r>' % (exc, val))
             """)
         except OperationError as e:
             revdb.send_print(e.errorstr(space, use_repr=True))

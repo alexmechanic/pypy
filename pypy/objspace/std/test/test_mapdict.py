@@ -1,4 +1,6 @@
+# -*- coding: utf-8 -*-
 import pytest
+
 from pypy.objspace.std.test.test_dictmultiobject import FakeSpace, W_DictObject
 from pypy.objspace.std.mapdict import *
 
@@ -153,6 +155,7 @@ def test_add_attribute_limit():
             obj.setdictvalue(space, str(i), i)
         # moved to dict (which is the remaining non-slot item)
         assert len(obj.checkstorage) == 1 + numslots
+        assert isinstance(obj.getdict(space).dstrategy, UnicodeDictStrategy)
 
         for i in range(1000):
             assert obj.getdictvalue(space, str(i)) == i
@@ -1222,7 +1225,17 @@ class AppTestWithMapDict(object):
             pass
         x = X(); x.a = 10; x.b = 20; x.c = 30
         d = x.__dict__
-        assert list(__pypy__.reversed_dict(d)) == d.keys()[::-1]
+        assert list(__pypy__.reversed_dict(d)) == list(d.keys())[::-1]
+
+    def test_nonascii_argname(self):
+        """
+        class X:
+            pass
+        x = X()
+        x.日本 = 3
+        assert x.日本 == 3
+        assert x.__dict__ == {'日本': 3}
+        """
 
     def test_bug_materialize_huge_dict(self):
         import __pypy__
@@ -1255,10 +1268,24 @@ class AppTestWithMapDict(object):
         d = a.__dict__
         # reading a.y during iteration changes the map! now that the iterators
         # store all the attrs anyway, just remove the check
-        res = list(d.iteritems())
+        res = list(d.items())
         assert res == [('x', 'a'), ('y', 1), ('z', 'b')]
 
+    def test_iter_reversed(self):
+        class A(object):
+            pass
+        a = A()
+        a.a = 2
+        a.b = 3
+        a.c = 4
+        d = a.__dict__
+        assert list(reversed(d)) == ['c', 'b', 'a']
+        assert list(reversed(d.keys())) == ['c', 'b', 'a']
+        assert list(reversed(d.values())) == [4, 3, 2]
+        assert list(reversed(d.items())) == [('c', 4), ('b', 3), ('a', 2)]
 
+
+@pytest.mark.skipif('config.option.runappdirect')
 class AppTestWithMapDictAndCounters(object):
     spaceconfig = {"objspace.std.withmethodcachecounter": True}
 
@@ -1266,8 +1293,8 @@ class AppTestWithMapDictAndCounters(object):
         from pypy.interpreter import gateway
         #
         def check(space, w_func, name):
-            w_code = space.getattr(w_func, space.wrap('func_code'))
-            nameindex = map(space.str_w, w_code.co_names_w).index(name)
+            w_code = space.getattr(w_func, space.wrap('__code__'))
+            nameindex = map(space.text_w, w_code.co_names_w).index(name)
             entry = w_code._mapdict_caches[nameindex]
             entry.failure_counter = 0
             entry.success_counter = 0
@@ -1410,9 +1437,11 @@ class AppTestWithMapDictAndCounters(object):
         assert res == (0, 1, 0)
 
     def test_custom_metaclass(self):
-        class A(object):
-            class __metaclass__(type):
-                pass
+        """
+        class metaclass(type):
+            pass
+        class A(metaclass=metaclass):
+            pass
         a = A()
         a.x = 42
         def f():
@@ -1424,8 +1453,10 @@ class AppTestWithMapDictAndCounters(object):
         assert res == (0, 1, 0)
         res = self.check(f, 'x')
         assert res == (0, 1, 0)
+        """
 
     def test_old_style_base(self):
+        skip('py3k no longer has old style classes')
         class B:
             pass
         class C(object):
@@ -1451,10 +1482,11 @@ class AppTestWithMapDictAndCounters(object):
         class C(object):
             def m(*args):
                 return args
-        C.sm = staticmethod(C.m.im_func)
-        C.cm = classmethod(C.m.im_func)
+        C.sm = staticmethod(C.m)
+        C.cm = classmethod(C.m)
 
-        exec """if 1:
+        d = {'C': C}
+        exec("""if 1:
 
             def f():
                 c = C()
@@ -1473,7 +1505,10 @@ class AppTestWithMapDictAndCounters(object):
                 res = c.cm(1)
                 assert res == (C, 1)
                 return 42
-        """
+        """, d)
+        f = d['f']
+        g = d['g']
+        h = d['h']
         res = self.check(f, 'm')
         assert res == (1, 0, 0)
         res = self.check(f, 'm')
@@ -1503,7 +1538,8 @@ class AppTestWithMapDictAndCounters(object):
             def m(*args):
                 return args
 
-        exec """if 1:
+        d = {'C': C}
+        exec("""if 1:
 
             def f():
                 c = C()
@@ -1514,7 +1550,8 @@ class AppTestWithMapDictAndCounters(object):
                 assert res == (c, 1)
                 return 42
 
-        """
+        """, d)
+        f = d['f']
         res = self.check(f, 'm')
         assert res == (1, 1, 1)
         res = self.check(f, 'm')
@@ -1579,8 +1616,8 @@ class AppTestWithMapDictAndCounters(object):
         a.z = 6
         a.y = 7
         assert list(a.__dict__) == ['x', 'z', 'y']
-        assert a.__dict__.values() == [5, 6, 7]
-        assert list(a.__dict__.iteritems()) == [('x', 5), ('z', 6), ('y', 7)]
+        assert list(a.__dict__.values()) == [5, 6, 7]
+        assert list(a.__dict__.items()) == [('x', 5), ('z', 6), ('y', 7)]
 
     def test_bug_method_change(self):
         class A(object):
@@ -1651,7 +1688,7 @@ class AppTestWithMapDictAndCounters(object):
         assert res2 == "foobar"
 
 
-
+@pytest.mark.skipif('config.option.runappdirect')
 class AppTestGlobalCaching(AppTestWithMapDict):
     spaceconfig = {"objspace.std.withmethodcachecounter": True}
 
@@ -1671,9 +1708,10 @@ class AppTestGlobalCaching(AppTestWithMapDict):
             l = [A(), B(), C()] * 10
             __pypy__.reset_method_cache_counter()
             # 'exec' to make sure that a.f() is compiled with CALL_METHOD
-            exec """for i, a in enumerate(l):
+            d = {'l': l}
+            exec("""for i, a in enumerate(l):
                         assert a.f() == 42 + i % 3
-            """ in locals()
+            """, d)
             cache_counter = __pypy__.mapdict_cache_counter("f")
             if cache_counter == (27, 3):
                 break

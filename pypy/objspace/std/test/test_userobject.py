@@ -45,5 +45,3 @@ class AppTestUserObject:
                 assert any.hash == hash(any)
             any = any.next
             i += 1
-
-

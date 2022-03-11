@@ -155,8 +155,8 @@ class AppTestJitHook(object):
         int_add = info.operations[0]
         dmp = info.operations[1]
         assert isinstance(dmp, pypyjit.DebugMergePoint)
-        assert dmp.pycode is self.f.func_code
-        assert dmp.greenkey == (self.f.func_code, 0, False)
+        assert dmp.pycode is self.f.__code__
+        assert dmp.greenkey == (self.f.__code__, 0, False)
         assert dmp.call_depth == 0
         assert dmp.call_id == 0
         assert dmp.offset == -1
@@ -164,7 +164,7 @@ class AppTestJitHook(object):
         assert int_add.offset == 0
         self.on_compile_bridge()
         expected = ('<JitLoopInfo pypyjit, 4 operations, starting at '
-                    '<(%s, 0, False)>>' % repr(self.f.func_code))
+                    '<(%s, 0, False)>>' % repr(self.f.__code__))
         assert repr(all[0]) == expected
         assert len(all) == 2
         pypyjit.set_compile_hook(None)
@@ -172,13 +172,14 @@ class AppTestJitHook(object):
         assert len(all) == 2
 
     def test_on_compile_exception(self):
-        import pypyjit, sys, cStringIO
+        import pypyjit, sys
+        from io import StringIO
 
         def hook(*args):
             1/0
 
         pypyjit.set_compile_hook(hook)
-        s = cStringIO.StringIO()
+        s = StringIO()
         prev = sys.stderr
         sys.stderr = s
         try:
@@ -256,9 +257,9 @@ class AppTestJitHook(object):
         def f():
             pass
 
-        op = DebugMergePoint("debug_merge_point", 'repr', 'pypyjit', 2, 3, (f.func_code, 0, 0))
+        op = DebugMergePoint("debug_merge_point", 'repr', 'pypyjit', 2, 3, (f.__code__, 0, 0))
         assert op.bytecode_no == 0
-        assert op.pycode is f.func_code
+        assert op.pycode is f.__code__
         assert repr(op) == 'repr'
         assert op.jitdriver_name == 'pypyjit'
         assert op.name == 'debug_merge_point'

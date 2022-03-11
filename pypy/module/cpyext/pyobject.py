@@ -34,8 +34,8 @@ def check_true(s_arg, bookeeper):
 
 def w_root_as_pyobj(w_obj, space):
     from rpython.rlib.debug import check_annotation
-    # make sure that translation crashes if we see this while not translating
-    # with cpyext
+    # make sure that translation crashes if we see this while translating
+    # without cpyext
     check_annotation(space.config.objspace.usemodules.cpyext, check_true)
     # default implementation of _cpyext_as_pyobj
     return rawrefcount.from_obj(PyObject, w_obj)
@@ -218,7 +218,8 @@ def create_ref(space, w_obj, w_userdata=None, immortal=False):
     pytype = rffi.cast(PyTypeObjectPtr, as_pyobj(space, w_type))
     typedescr = get_typedescr(w_obj.typedef)
     if pytype.c_tp_itemsize != 0:
-        itemcount = space.len_w(w_obj) # PyBytesObject and subclasses
+        # PyBytesObject, PyUnicode object, and subclasses
+        itemcount = space.len_w(w_obj)
     else:
         itemcount = 0
     py_obj = typedescr.allocate(space, w_type, itemcount=itemcount, immortal=immortal)
@@ -358,7 +359,8 @@ def make_ref(space, w_obj, w_userdata=None, immortal=False):
     same PyObject for the same W_Root; for example, integers.
     """
     assert not is_pyobj(w_obj)
-    if w_obj is not None and space.type(w_obj) is space.w_int:
+    if False and w_obj is not None and space.type(w_obj) is space.w_int:
+        # XXX: adapt for pypy3
         state = space.fromcache(State)
         intval = space.int_w(w_obj)
         return state.ccall("PyInt_FromLong", intval)

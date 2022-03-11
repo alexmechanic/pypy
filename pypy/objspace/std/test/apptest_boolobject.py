@@ -16,11 +16,6 @@ def test_bool_int():
     assert int(False) is 0
     assert True.__int__() is 1
 
-def test_bool_long():
-    assert long(True) == 1L
-    assert long(False) == 0L
-    assert True.__long__() == 1L
-
 def test_bool_ops():
     assert True + True == 2
     assert False | False is False
@@ -51,3 +46,14 @@ def test_new():
 
 def test_cant_subclass_bool():
     raises(TypeError, "class b(bool): pass")
+
+def test_convert_to_bool():
+    check = lambda o: raises(TypeError, bool, o)
+    class Spam(int):
+        def __bool__():
+            return 1
+    raises(TypeError, bool, Spam())
+
+def test_from_bytes():
+    assert bool.from_bytes(b"", 'little') is False
+    assert bool.from_bytes(b"dasijldjs" * 157, 'little') is True

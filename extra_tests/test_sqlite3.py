@@ -4,6 +4,7 @@
 from __future__ import absolute_import
 import pytest
 import sys
+import gc
 
 _sqlite3 = pytest.importorskip('_sqlite3')
 
@@ -11,11 +12,13 @@ pypy_only = pytest.mark.skipif('__pypy__' not in sys.builtin_module_names,
     reason="PyPy-only test")
 
 
-@pytest.yield_fixture
+@pytest.fixture
 def con():
     con = _sqlite3.connect(':memory:')
     yield con
     con.close()
+
+con2 = con # allow using two connections
 
 
 def test_list_ddl(con):
@@ -33,9 +36,9 @@ def test_list_ddl(con):
 
 @pypy_only
 def test_connect_takes_same_positional_args_as_Connection(con):
-    from inspect import getargspec
-    clsargs = getargspec(_sqlite3.Connection.__init__).args[1:]  # ignore self
-    conargs = getargspec(_sqlite3.connect).args
+    from inspect import getfullargspec
+    clsargs = getfullargspec(_sqlite3.Connection.__init__).args[1:]  # ignore self
+    conargs = getfullargspec(_sqlite3.connect).args
     assert clsargs == conargs
 
 def test_total_changes_after_close(con):
@@ -64,7 +67,6 @@ def test_cursor_check_init(con):
         cur.execute('select 1')
     assert '__init__' in str(excinfo.value)
 
-
 def test_connection_after_close(con):
     with pytest.raises(TypeError):
         con()
@@ -89,8 +91,7 @@ def test_cursor_iter(con):
     with pytest.raises(StopIteration):
         next(cur)
 
-    with pytest.raises(_sqlite3.ProgrammingError):
-        cur.executemany('select 1', [])
+    cur.executemany('select 1', [])
     with pytest.raises(StopIteration):
         next(cur)
 
@@ -168,15 +169,12 @@ def test_on_conflict_rollback_executemany(con):
         pytest.fail("_sqlite3 knew nothing about the implicit ROLLBACK")
 
 def test_statement_arg_checking(con):
-    with pytest.raises(_sqlite3.Warning) as e:
+    with pytest.raises(TypeError) as e:
         con(123)
-    assert str(e.value).startswith('SQL is of wrong type. Must be string')
-    with pytest.raises(ValueError) as e:
+    with pytest.raises(TypeError) as e:
         con.execute(123)
-    assert str(e.value).startswith('operation parameter must be str')
-    with pytest.raises(ValueError) as e:
+    with pytest.raises(TypeError) as e:
         con.executemany(123, 123)
-    assert str(e.value).startswith('operation parameter must be str')
     with pytest.raises(ValueError) as e:
         con.executescript(123)
     assert str(e.value).startswith('script argument must be unicode')
@@ -202,8 +200,8 @@ def test_statement_param_checking(con):
 
 def test_explicit_begin(con):
     con.execute('BEGIN')
-    con.execute('BEGIN ')
-    con.execute('BEGIN')
+    with pytest.raises(_sqlite3.OperationalError):
+        con.execute('BEGIN ')
     con.commit()
     con.execute('BEGIN')
     con.commit()
@@ -213,20 +211,17 @@ def test_row_factory_use(con):
     con.execute('select 1')
 
 def test_returning_blob_must_own_memory(con):
-    import gc
-    con.create_function("returnblob", 0, lambda: buffer("blob"))
+    con.create_function("returnblob", 0, lambda: memoryview(b"blob"))
     cur = con.execute("select returnblob()")
     val = cur.fetchone()[0]
-    for i in range(5):
-        gc.collect()
-        got = (val[0], val[1], val[2], val[3])
-        assert got == ('b', 'l', 'o', 'b')
-    # in theory 'val' should be a read-write buffer
-    # but it's not right now
-    if not hasattr(_sqlite3, '_ffi'):
-        val[1] = 'X'
-        got = (val[0], val[1], val[2], val[3])
-        assert got == ('b', 'X', 'o', 'b')
+    assert isinstance(val, bytes)
+
+def test_function_arg_str_null_char(con):
+    con.create_function("strlen", 1, lambda a: len(a))
+    cur = con.execute("select strlen(?)", ["x\0y"])
+    val = cur.fetchone()[0]
+    assert val == 3
+
 
 def test_description_after_fetchall(con):
     cur = con.cursor()
@@ -238,15 +233,15 @@ def test_executemany_lastrowid(con):
     cur = con.cursor()
     cur.execute("create table test(a)")
     cur.executemany("insert into test values (?)", [[1], [2], [3]])
-    assert cur.lastrowid is None
+    assert cur.lastrowid == 0
     # issue 2682
     cur.execute('''insert
                 into test
                 values (?)
                 ''', (1, ))
-    assert cur.lastrowid is not None
+    assert cur.lastrowid
     cur.execute('''insert\t into test values (?) ''', (1, ))
-    assert cur.lastrowid is not None
+    assert cur.lastrowid
 
 def test_authorizer_bad_value(con):
     def authorizer_cb(action, arg1, arg2, dbname, source):
@@ -265,7 +260,7 @@ def test_authorizer_bad_value(con):
 def test_issue1573(con):
     cur = con.cursor()
     cur.execute(u'SELECT 1 as méil')
-    assert cur.description[0][0] == u"méil".encode('utf-8')
+    assert cur.description[0][0] == u"méil"
 
 def test_adapter_exception(con):
     def cast(obj):
@@ -274,11 +269,8 @@ def test_adapter_exception(con):
     _sqlite3.register_adapter(int, cast)
     try:
         cur = con.cursor()
-        cur.execute("select ?", (4,))
-        val = cur.fetchone()[0]
-        # Adapter error is ignored, and parameter is passed as is.
-        assert val == 4
-        assert type(val) is int
+        with pytest.raises(ZeroDivisionError):
+            cur.execute("select ?", (4,))
     finally:
         del _sqlite3.adapters[(int, _sqlite3.PrepareProtocol)]
 
@@ -323,6 +315,107 @@ def test_close_in_del_ordering():
     gc.collect()
     assert SQLiteBackend.success
 
+def test_locked_table(con):
+    con.execute("CREATE TABLE foo(x)")
+    con.execute("INSERT INTO foo(x) VALUES (?)", [42])
+    cur = con.execute("SELECT * FROM foo")  # foo() is locked while cur is active
+    with pytest.raises(_sqlite3.OperationalError):
+        con.execute("DROP TABLE foo")
+
+def test_cursor_close(con):
+    con.execute("CREATE TABLE foo(x)")
+    con.execute("INSERT INTO foo(x) VALUES (?)", [42])
+    cur = con.execute("SELECT * FROM foo")
+    cur.close()
+    con.execute("DROP TABLE foo")  # no error
+
+def test_cursor_del(con):
+    con.execute("CREATE TABLE foo(x)")
+    con.execute("INSERT INTO foo(x) VALUES (?)", [42])
+    con.execute("SELECT * FROM foo")
+    import gc; gc.collect()
+    con.execute("DROP TABLE foo")  # no error
+
+def test_open_path():
+    class P:
+        def __fspath__(self):
+            return b":memory:"
+    _sqlite3.connect(P())
+
+def test_isolation_bug():
+    con = _sqlite3.connect(":memory:", isolation_level=None)
+    #con = _sqlite3.connect(":memory:")
+    #con.isolation_level = None
+    cur = con.cursor()
+    cur.execute("create table foo(x);")
+
+def test_reset_of_shared_statement(con):
+    con = _sqlite3.connect(':memory:')
+    c0 = con.cursor()
+    c0.execute('CREATE TABLE data(n int, t int)')
+    # insert two values
+    c0.execute('INSERT INTO data(n, t) VALUES(?, ?)', (0, 1))
+    c0.execute('INSERT INTO data(n, t) VALUES(?, ?)', (1, 2))
+
+    c1 = con.execute('select * from data')
+    list(c1) # c1's statement is no longer in use afterwards
+    c2 = con.execute('select * from data')
+    # the statement between c1 and c2 is shared
+    assert c1._Cursor__statement is c2._Cursor__statement
+    val = next(c2)
+    assert val == (0, 1)
+    c1 = None # make c1 unreachable
+    gc.collect() # calling c1.__del__ used to reset c2._Cursor__statement!
+    val = next(c2)
+    assert val == (1, 2)
+    with pytest.raises(StopIteration):
+        next(c2)
+
+def test_row_index_unicode(con):
+    import sqlite3
+    con.row_factory = sqlite3.Row
+    row = con.execute("select 1 as \xff").fetchone()
+    assert row["\xff"] == 1
+    with pytest.raises(IndexError):
+        row['\u0178']
+    with pytest.raises(IndexError):
+        row['\xdf']
+
+@pytest.mark.skipif(not hasattr(_sqlite3.Connection, "backup"), reason="no backup")
+class TestBackup:
+    def test_target_is_connection(self, con):
+        with pytest.raises(TypeError):
+            con.backup(None)
+
+    def test_target_different_self(self, con):
+        with pytest.raises(ValueError):
+            con.backup(con)
+
+    def test_progress_callable(self, con, con2):
+        with pytest.raises(TypeError):
+            con.backup(con2, progress=34)
+
+    def test_backup_simple(self, con, con2):
+        cursor = con.cursor()
+        con.execute('CREATE TABLE foo (key INTEGER)')
+        con.executemany('INSERT INTO foo (key) VALUES (?)', [(3,), (4,)])
+        con.commit()
+
+        con.backup(con2)
+        result = con2.execute("SELECT key FROM foo ORDER BY key").fetchall()
+        assert result[0][0] == 3
+        assert result[1][0] == 4
+
+def test_reset_already_committed_statements_bug(con):
+    con.execute('''CREATE TABLE COMPANY
+             (ID INT PRIMARY KEY,
+             A INT);''')
+    con.execute("INSERT INTO COMPANY (ID, A) \
+          VALUES (1, 2)")
+    cursor = con.execute("SELECT id, a from COMPANY")
+    con.commit()
+    con.execute("DROP TABLE COMPANY")
+
 def test_empty_statement():
     r = _sqlite3.connect(":memory:")
     cur = r.cursor()
@@ -330,3 +423,16 @@ def test_empty_statement():
         r = cur.execute(sql)
         assert r.description is None
         assert cur.fetchall() == []
+
+def test_uninit_connection():
+    con = _sqlite3.Connection.__new__(_sqlite3.Connection)
+    with pytest.raises(_sqlite3.ProgrammingError):
+        con.isolation_level
+    with pytest.raises(_sqlite3.ProgrammingError):
+        con.total_changes
+    with pytest.raises(_sqlite3.ProgrammingError):
+        con.in_transaction
+    with pytest.raises(_sqlite3.ProgrammingError):
+        con.iterdump()
+    with pytest.raises(_sqlite3.ProgrammingError):
+        con.close()

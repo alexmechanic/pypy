@@ -4,7 +4,10 @@ from pypy.module.pypyjit.test_pypy_c.test_00_model import BaseTestPyPyC
 class TestThread(BaseTestPyPyC):
     def test_simple(self):
         def main(n):
-            import thread
+            try:
+                import _thread as thread
+            except ImportError:
+                import thread
             def f():
                 i = 0
                 while i < n:
@@ -29,8 +32,11 @@ class TestThread(BaseTestPyPyC):
 
     def test_tls(self):
         def main(n):
-            import thread
-            local = thread._local()
+            try:
+                from _thread import _local
+            except ImportError:
+                from thread import _local
+            local = _local()
             local.x = "abc" # prevent type unboxing
             local.x = 1
             i = 0
@@ -65,16 +71,16 @@ class TestThread(BaseTestPyPyC):
         guard_true(i56, descr=...)
         p57 = force_token()
         setfield_gc(p0, p57, descr=<FieldP pypy.interpreter.pyframe.PyFrame.vable_token 8>)
-        i54 = call_release_gil_i(0, _, i37, 1, descr=<Calli 4 ii EF=7>)
+        i58 = call_may_force_i(ConstClass(acquire_timed), p31, -1, descr=<Calli . ri EF=7>)
         guard_not_forced(descr=...)
         guard_no_exception(descr=...)
-        i55 = int_ne(i54, 1)              # sanity-check added in 90c5a06b0923
-        guard_false(i55, descr=...)
+        i99 = int_eq(i58, 1)
+        guard_true(i99, descr=...)
         i58 = int_sub(i44, 1)
+        guard_not_invalidated?
         i59 = call_i(ConstClass(RPyThreadReleaseLock), i37, descr=<Calli . i EF=2>)
         i60 = int_is_true(i59)
         guard_false(i60, descr=...)
-        guard_not_invalidated(descr=...)
         --TICK--
         jump(..., descr=...)
         """)

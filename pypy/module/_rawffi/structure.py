@@ -194,9 +194,9 @@ class W_Structure(W_DataShape):
             raise oefmt(space.w_AttributeError,
                         "C Structure has no attribute %s", attr)
 
-    @unwrap_spec(autofree=bool)
+    @unwrap_spec(autofree=int)
     def descr_call(self, space, autofree=False):
-        return self.allocate(space, 1, autofree)
+        return self.allocate(space, 1, bool(autofree))
 
     def descr_repr(self, space):
         fieldnames = ' '.join(["'%s'" % name for name, _, _ in self.fields])
@@ -253,8 +253,9 @@ class W_Structure(W_DataShape):
             lltype.free(self.ffi_struct, flavor='raw')
 
 
-@unwrap_spec(union=bool, pack=int)
-def descr_new_structure(space, w_type, w_shapeinfo, union=False, pack=0):
+@unwrap_spec(union=int, pack=int)
+def descr_new_structure(space, w_type, w_shapeinfo, union=0, pack=0):
+    union = bool(union)
     if pack < 0:
         raise oefmt(space.w_ValueError,
                     "_pack_ must be a non-negative integer")
@@ -382,7 +383,7 @@ class W_StructureInstance(W_DataInstance):
 
 
 W_StructureInstance.typedef = TypeDef(
-    'StructureInstance',
+    'StructureInstance', None, None, "read-write",
     __repr__    = interp2app(W_StructureInstance.descr_repr),
     __getattr__ = interp2app(W_StructureInstance.getattr),
     __setattr__ = interp2app(W_StructureInstance.setattr),
@@ -404,7 +405,7 @@ class W_StructureInstanceAutoFree(W_StructureInstance):
             self._free()
 
 W_StructureInstanceAutoFree.typedef = TypeDef(
-    'StructureInstanceAutoFree',
+    'StructureInstanceAutoFree', None, None, "read-write",
     __repr__    = interp2app(W_StructureInstance.descr_repr),
     __getattr__ = interp2app(W_StructureInstance.getattr),
     __setattr__ = interp2app(W_StructureInstance.setattr),

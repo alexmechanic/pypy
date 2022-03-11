@@ -1,3 +1,4 @@
+# -*- encoding: utf-8 -*-
 """
 The main test for the set implementation is located
 in the stdlibs test/test_set.py which is located in lib-python
@@ -48,7 +49,9 @@ class TestW_SetObject:
 
     def test_space_newset(self):
         s = self.space.newset()
-        assert self.space.str_w(self.space.repr(s)) == 'set([])'
+        assert self.space.text_w(self.space.repr(s)) == 'set()'
+        # check that the second time we don't get 'set(...)'
+        assert self.space.text_w(self.space.repr(s)) == 'set()'
 
     def test_intersection_order(self):
         # theses tests make sure that intersection is done in the correct order
@@ -80,7 +83,7 @@ class TestW_SetObject:
 
     def test_create_set_from_list(self):
         from pypy.interpreter.baseobjspace import W_Root
-        from pypy.objspace.std.setobject import BytesSetStrategy, ObjectSetStrategy
+        from pypy.objspace.std.setobject import BytesSetStrategy, ObjectSetStrategy, AsciiSetStrategy
         from pypy.objspace.std.floatobject import W_FloatObject
 
         w = self.space.wrap
@@ -105,6 +108,8 @@ class TestW_SetObject:
         w_list = self.space.iter(W_ListObject(self.space, [w(u"1"), w(u"2"), w(u"3")]))
         w_set = W_SetObject(self.space)
         _initialize_set(self.space, w_set, w_list)
+        assert w_set.strategy is self.space.fromcache(AsciiSetStrategy)
+        assert w_set.strategy.unerase(w_set.sstorage) == {u"1":None, u"2":None, u"3":None}
 
         w_list = W_ListObject(self.space, [w("1"), w(2), w("3")])
         w_set = W_SetObject(self.space)
@@ -129,13 +134,21 @@ class TestW_SetObject:
 
         w_a = W_SetObject(self.space)
         _initialize_set(self.space, w_a, wb("abcdefg"))
-        assert sorted(self.space.listview_bytes(w_a)) == list("abcdefg")
-        assert self.space.listview_int(w_a) is None
+        assert sorted(self.space.listview_int(w_a)) == [97, 98, 99, 100, 101, 102, 103]
+        assert self.space.listview_bytes(w_a) is None
 
         w_b = W_SetObject(self.space)
         _initialize_set(self.space, w_b, self.space.newlist([w(1),w(2),w(3),w(4),w(5)]))
         assert sorted(self.space.listview_int(w_b)) == [1,2,3,4,5]
         assert self.space.listview_bytes(w_b) is None
+
+    def test_cpyext_add_frozen(self, space):
+        t1 = W_FrozensetObject(space)
+        assert space.len_w(t1) == 0
+        res = t1.cpyext_add_frozen(space.newint(1))
+        assert res
+        assert space.len_w(t1) == 1
+
 
 class AppTestAppSetTest:
 
@@ -259,7 +272,7 @@ class AppTestAppSetTest:
         raises(KeyError, "b.pop()")
 
         a = set([1,2,3,4,5])
-        for i in xrange(5):
+        for i in range(5):
             a.pop()
         assert a == set()
         raises(KeyError, "a.pop()")
@@ -300,7 +313,7 @@ class AppTestAppSetTest:
         class subset(set):pass
         a = subset()
         b = a | set('abc')
-        assert type(b) is subset
+        assert type(b) is set
 
     def test_init_new_behavior(self):
         s = set.__new__(set, 'abc')
@@ -318,14 +331,14 @@ class AppTestAppSetTest:
         b = subset('abc')
         subset.__new__ = lambda *args: foobar   # not called
         b = b.copy()
-        assert type(b) is subset
+        assert type(b) is set
         assert set(b) == set('abc')
         #
         class frozensubset(frozenset): pass
         b = frozensubset('abc')
         frozensubset.__new__ = lambda *args: foobar   # not called
         b = b.copy()
-        assert type(b) is frozensubset
+        assert type(b) is frozenset
         assert frozenset(b) == frozenset('abc')
 
     def test_union(self):
@@ -337,11 +350,18 @@ class AppTestAppSetTest:
         d = a.union()
         assert d == a
 
+    def test_bytes_items(self):
+        s = set([b'hello'])
+        assert s.pop() == b'hello'
+
+    def test_set_literal(self):
+        """
+        assert {b'a'}.pop() == b'a'
+        """
+
     def test_compare(self):
-        raises(TypeError, cmp, set('abc'), set('abd'))
-        raises(TypeError, cmp, frozenset('abc'), frozenset('abd'))
         assert set('abc') != 'abc'
-        assert not set('abc') < 42
+        raises(TypeError, "set('abc') < 42")
         assert not (set('abc') < set('def'))
         assert not (set('abc') <= frozenset('abd'))
         assert not (set('abc') < frozenset('abd'))
@@ -376,10 +396,41 @@ class AppTestAppSetTest:
         assert set() != set('abc')
         assert set('abc') != set('abd')
 
-        class X(set):
-            pass
+    def test_compare_other(self):
+        class TestRichSetCompare:
+            def __gt__(self, some_set):
+                self.gt_called = True
+                return False
+            def __lt__(self, some_set):
+                self.lt_called = True
+                return False
+            def __ge__(self, some_set):
+                self.ge_called = True
+                return False
+            def __le__(self, some_set):
+                self.le_called = True
+                return False
 
-        raises(TypeError, cmp, X(), X())
+        # This first tries the builtin rich set comparison, which doesn't know
+        # how to handle the custom object. Upon returning NotImplemented, the
+        # corresponding comparison on the right object is invoked.
+        myset = set(range(3))
+
+        myobj = TestRichSetCompare()
+        myset < myobj
+        assert myobj.gt_called
+
+        myobj = TestRichSetCompare()
+        myset > myobj
+        assert myobj.lt_called
+
+        myobj = TestRichSetCompare()
+        myset <= myobj
+        assert myobj.ge_called
+
+        myobj = TestRichSetCompare()
+        myset >= myobj
+        assert myobj.le_called
 
     def test_libpython_equality(self):
         for thetype in [frozenset, set]:
@@ -409,7 +460,7 @@ class AppTestAppSetTest:
         s2 = s1.copy()
         assert s1 is not s2
         assert s1 == s2
-        assert type(s2) is myfrozen
+        assert type(s2) is frozenset
 
     def test_update(self):
         s1 = set('abc')
@@ -448,9 +499,9 @@ class AppTestAppSetTest:
         s = set([1, 2, 3])
         s.add(A(s))
         therepr = repr(s)
-        assert therepr.startswith("set([")
-        assert therepr.endswith("])")
-        inner = set(therepr[5:-2].split(", "))
+        assert therepr.startswith("{")
+        assert therepr.endswith("}")
+        inner = set(therepr[1:-1].split(", "))
         assert inner == set(["1", "2", "3", "set(...)"])
 
     def test_recursive_repr_frozenset(self):
@@ -461,8 +512,8 @@ class AppTestAppSetTest:
         s = frozenset([1, 2, 3, a])
         a.s = s
         therepr = repr(s)
-        assert therepr.startswith("frozenset([")
-        assert therepr.endswith("])")
+        assert therepr.startswith("frozenset({")
+        assert therepr.endswith("})")
         inner = set(therepr[11:-2].split(", "))
         assert inner == set(["1", "2", "3", "frozenset(...)"])
 
@@ -609,8 +660,7 @@ class AppTestAppSetTest:
             s = subset([2])
             assert s.x == ([2],)
             t = s | base([5])
-            # obscure CPython behavior:
-            assert type(t) is subset
+            assert type(t) is base, 'base is %s, type(t) is %s' % (base, type(t))
             assert not hasattr(t, 'x')
 
     def test_reverse_ops(self):
@@ -1008,7 +1058,7 @@ class AppTestAppSetTest:
         it = iter(s)
         s.add(7)
         # 's' is now length 4
-        raises(RuntimeError, it.next)
+        raises(RuntimeError, it.__next__)
 
     def test_iter_set_strategy_only_change_1(self):
         s = set([1, 3, 5])
@@ -1016,19 +1066,43 @@ class AppTestAppSetTest:
         class Foo(object):
             def __eq__(self, other):
                 return False
+            def __hash__(self):
+                return 0
         assert Foo() not in s      # this changes the strategy of 'd'
         lst = list(s)  # but iterating still works
         assert sorted(lst) == [1, 3, 5]
 
     def test_iter_set_strategy_only_change_2(self):
-        s = set([1, 3, 5])
+        # on py3k the IntStrategy doesn't work yet. So, we use the
+        # StringSetStrategy for this test
+        s = set(['1', '3', '5'])
         it = iter(s)
-        s.add('foo')
-        s.remove(1)
+        s.add(42) # change the strategy
+        s.remove('1')
         # 's' is still length 3, but its strategy changed.  we are
         # getting a RuntimeError because iterating over the old storage
         # gives us 1, but 1 is not in the set any longer.
         raises(RuntimeError, list, it)
+
+    def test_iter_bytes_strategy(self):
+        l = [b'a', b'b']
+        s = set(l)
+        n = next(iter(s))
+        assert type(n) is bytes
+        assert n in l
+
+    def test_unicodestrategy(self):
+        s = 'àèìòù'
+        myset = set([s])
+        s2 = myset.pop()
+        assert s2 == s
+
+    def test_preserve_identity_of_strings(self):
+        s = 'hello'
+        myset = set([s])
+        s2 = myset.pop()
+        assert s2 == s
+        assert s2 is s
 
     def test_intersect_frozenset_set(self):
         # worked before
@@ -1075,6 +1149,23 @@ class AppTestAppSetTest:
            yield 1
         raises(ValueError, set, f())
 
+    def test_pickle(self):
+        d = {1, 2, 3}
+        it = iter(d)
+        first = next(it)
+        reduced = it.__reduce__()
+        rebuild, args = reduced
+        assert rebuild is iter
+        new = rebuild(*args)
+        items = set(new)
+        assert len(items) == 2
+        items.add(first)
+        assert items == set(d)
+
+    def test_unicode_bug_in_listview_utf8(self):
+        l1 = set(u'\u1234\u2345')
+        assert l1 == set([u'\u1234', '\u2345'])
+
     def test_frozenset_init_does_nothing(self):
         f = frozenset([1, 2, 3])
         f.__init__(4, 5, 6)
@@ -1092,5 +1183,18 @@ class AppTestAppSetTest:
 
     def test_cant_mutate_frozenset_via_set(self):
         x = frozenset()
-        raises(TypeError, set.add.im_func, x, 1)
-        raises(TypeError, set.__ior__.im_func, x, set([2]))
+        raises(TypeError, set.add, x, 1)
+        raises(TypeError, set.__ior__, x, set([2]))
+
+    def test_class_getitem(self):
+        for cls in set, frozenset:
+            assert set[int, str].__origin__ is set
+            assert set[int, str].__args__ == (int, str)
+
+    def test_frozenset_hash_like_cpython(self):
+        import sys
+        if sys.maxsize != 2**63 - 1:
+            skip("64 bit only")
+        assert hash(frozenset()) == 133146708735736
+        h = hash(frozenset([1, 2, 9]))
+        assert h == (-5390384031640186368)

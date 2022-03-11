@@ -18,11 +18,11 @@ class TestImport(BaseApiTest):
 
         with rffi.scoped_str2charp("foobar") as modname:
             w_foobar = PyImport_AddModule(space, modname)
-        assert space.str_w(space.getattr(w_foobar,
+        assert space.text_w(space.getattr(w_foobar,
                                          space.wrap('__name__'))) == 'foobar'
 
-    def test_getmoduledict(self, space):
-        testmod = "_functools"
+    def test_getmoduledict(self, space, api):
+        testmod = "imghdr"
         w_pre_dict = PyImport_GetModuleDict(space, )
         assert not space.contains_w(w_pre_dict, space.wrap(testmod))
 
@@ -40,6 +40,12 @@ class TestImport(BaseApiTest):
         stat = PyImport_ReloadModule(space, stat)
         assert space.getattr(stat, space.wrap("S_IMODE"))
 
+    def test_ImportModuleLevelObject(self, space):
+        w_mod = PyImport_ImportModuleLevelObject(
+            space, space.wrap('stat'), None, None, None, 0)
+        assert w_mod
+        assert space.getattr(w_mod, space.wrap("S_IMODE"))
+
     def test_lock(self, space):
         # "does not crash"
         _PyImport_AcquireLock(space, )
@@ -56,3 +62,18 @@ class AppTestImportLogic(AppTestCpythonExtensionBase):
         sys.path.append(os.path.dirname(path))
         import test_import_module
         assert test_import_module.TEST is None
+
+    def test_getmodule(self):
+        import sys
+        module = self.import_extension('foo', [
+            ("getmodule", "METH_O",
+            '''
+                PyObject *mod = PyImport_GetModule(args);
+                if (mod == NULL) {
+                    Py_RETURN_NONE;
+                }
+                return mod;
+            ''')])
+        _sys = module.getmodule('sys')
+        assert sys is _sys
+        assert module.getmodule('not_in_sys_modules') is None

@@ -18,6 +18,8 @@ PyAPI_FUNC(long) PyOS_strtol(const char *, char **, int);
 		 PyType_FastSubclass(Py_TYPE(op), Py_TPFLAGS_LONG_SUBCLASS)
 #define PyLong_CheckExact(op) (Py_TYPE(op) == &PyLong_Type)
 
+#define PyLong_AS_LONG(op) PyLong_AsLong(op)
+
 #define _PyLong_AsByteArray(v, bytes, n, little_endian, is_signed)   \
     _PyLong_AsByteArrayO((PyObject *)(v), bytes, n, little_endian, is_signed)
 

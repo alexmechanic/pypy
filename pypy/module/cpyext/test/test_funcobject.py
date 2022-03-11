@@ -4,8 +4,8 @@ from pypy.module.cpyext.pyobject import PyObject, make_ref, from_ref, decref
 from pypy.module.cpyext.methodobject import PyClassMethod_New
 from pypy.module.cpyext.funcobject import (
     PyFunctionObject, PyCodeObject, CODE_FLAGS, PyMethod_Function,
-    PyMethod_Self, PyMethod_Class, PyMethod_New, PyFunction_GetCode,
-    PyCode_NewEmpty, PyCode_GetNumFree)
+    PyMethod_Self, PyMethod_New, PyFunction_GetCode,
+    PyCode_NewEmpty, PyCode_GetNumFree, PyCode_Addr2Line)
 from pypy.interpreter.function import Function
 from pypy.interpreter.pycode import PyCode
 
@@ -31,15 +31,13 @@ class TestFunctionObject(BaseApiTest):
             return C().method
         """)
 
-        w_function = space.getattr(w_method, space.wrap("im_func"))
-        w_self = space.getattr(w_method, space.wrap("im_self"))
-        w_class = space.getattr(w_method, space.wrap("im_class"))
+        w_function = space.getattr(w_method, space.wrap("__func__"))
+        w_self = space.getattr(w_method, space.wrap("__self__"))
 
         assert space.is_w(PyMethod_Function(space, w_method), w_function)
         assert space.is_w(PyMethod_Self(space, w_method), w_self)
-        assert space.is_w(PyMethod_Class(space, w_method), w_class)
 
-        w_method2 = PyMethod_New(space, w_function, w_self, w_class)
+        w_method2 = PyMethod_New(space, w_function, w_self)
         assert space.eq_w(w_method, w_method2)
 
     def test_getcode(self, space):
@@ -69,7 +67,6 @@ class TestFunctionObject(BaseApiTest):
             decref(space, ref)
             return co_flags
         assert get_flags("x") == CO_NESTED | CO_OPTIMIZED | CO_NEWLOCALS
-        assert get_flags("x", "exec x") == CO_NESTED | CO_NEWLOCALS
         assert get_flags("x, *args") & CO_VARARGS
         assert get_flags("x, **kw") & CO_VARKEYWORDS
         assert get_flags("x", "yield x") & CO_GENERATOR
@@ -112,3 +109,16 @@ class TestFunctionObject(BaseApiTest):
         space.setattr(w_class, space.wrap("classmethod"), w_classmethod)
         assert space.is_w(
             space.call_method(w_instance, "classmethod"), w_class)
+
+    def test_addr2line(self, space):
+        w_function = space.appexec([], """():
+            def func():
+                x = a + b
+                return x
+            return func
+        """, cache=False)
+        w_code = PyFunction_GetCode(space, w_function)
+        assert PyCode_Addr2Line(space, w_code, 0) == 3
+        assert PyCode_Addr2Line(space, w_code, 8) == 4
+        assert PyCode_Addr2Line(space, w_code, -1) == -1
+        assert PyCode_Addr2Line(space, w_code, 100) == -1

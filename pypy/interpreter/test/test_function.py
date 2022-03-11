@@ -1,4 +1,3 @@
-import pytest
 from pypy.interpreter import eval
 from pypy.interpreter.function import Function, Method, descr_function_get
 from pypy.interpreter.pycode import PyCode
@@ -6,11 +5,20 @@ from pypy.interpreter.argument import Arguments
 
 
 class TestMethod:
-    def setup_method(self, method):
-        def c(self, bar):
-            return bar
-        code = PyCode._from_code(self.space, c.func_code)
-        self.fn = Function(self.space, code, self.space.newdict())
+    @classmethod
+    def compile(cls, src):
+        assert src.strip().startswith("def ")
+        compiler = cls.space.createcompiler()
+        code = compiler.compile(src, '<hello>', 'exec', 0).co_consts_w[0]
+        return Function(cls.space, code, cls.space.newdict())
+
+    def setup_class(cls):
+        src = """
+def c(self, bar):
+    return bar
+        """
+        cls.fn = cls.compile(src)
+
 
     def test_get(self):
         space = self.space
@@ -35,9 +43,7 @@ class TestMethod:
     def test_method_get(self):
         space = self.space
         # Create some function for this test only
-        def m(self): return self
-        func = Function(space, PyCode._from_code(self.space, m.func_code),
-                        space.newdict())
+        func = self.compile("def m(self): return self")
         # Some shorthands
         obj1 = space.wrap(23)
         obj2 = space.wrap(42)
@@ -56,27 +62,14 @@ class TestMethod:
         # Check method returned from unbound_method.__get__()
         w_meth3 = descr_function_get(space, func, space.w_None, space.type(obj2))
         meth3 = space.unwrap(w_meth3)
-        w_meth4 = meth3.descr_method_get(obj2, space.w_None)
-        meth4 = space.unwrap(w_meth4)
-        assert isinstance(meth4, Method)
-        assert meth4.call_args(args) == obj2
-        # Check method returned from unbound_method.__get__()
-        # --- with an incompatible class
-        w_meth5 = meth3.descr_method_get(space.wrap('hello'), space.w_text)
-        assert space.is_w(w_meth5, w_meth3)
-        # Same thing, with an old-style class
-        w_oldclass = space.call_function(
-            space.builtin.get('__metaclass__'),
-            space.wrap('OldClass'), space.newtuple([]), space.newdict())
-        w_meth6 = meth3.descr_method_get(space.wrap('hello'), w_oldclass)
-        assert space.is_w(w_meth6, w_meth3)
-        # Reverse order of old/new styles
-        w_meth7 = descr_function_get(space, func, space.w_None, w_oldclass)
-        meth7 = space.unwrap(w_meth7)
-        w_meth8 = meth7.descr_method_get(space.wrap('hello'), space.w_text)
-        assert space.is_w(w_meth8, w_meth7)
+        assert meth3 is func
 
 class TestShortcuts(object):
+    def compile(self, src):
+        assert src.strip().startswith("def ")
+        compiler = self.space.createcompiler()
+        code = compiler.compile(src, '<hello>', 'exec', 0).co_consts_w[0]
+        return Function(self.space, code, self.space.newdict())
 
     def test_call_function(self):
         space = self.space
@@ -84,14 +77,15 @@ class TestShortcuts(object):
         d = {}
         for i in range(10):
             args = "(" + ''.join(["a%d," % a for a in range(i)]) + ")"
-            exec """
+            src = """
 def f%s:
     return %s
-""" % (args, args) in d
+""" % (args, args)
+            exec src in d
             f = d['f']
             res = f(*range(i))
-            code = PyCode._from_code(self.space, f.func_code)
-            fn = Function(self.space, code, self.space.newdict())
+            fn = self.compile(src)
+            code = fn.code
 
             assert fn.code.fast_natural_arity == i|PyCode.FLATPYCALL
             if i < 5:
@@ -110,18 +104,18 @@ def f%s:
     def test_flatcall(self):
         space = self.space
 
-        def f(a):
-            return a
-        code = PyCode._from_code(self.space, f.func_code)
-        fn = Function(self.space, code, self.space.newdict())
+        src = """
+def f(a):
+    return a"""
+        fn = self.compile(src)
 
         assert fn.code.fast_natural_arity == 1|PyCode.FLATPYCALL
 
         def bomb(*args):
             assert False, "shortcutting should have avoided this"
 
-        code.funcrun = bomb
-        code.funcrun_obj = bomb
+        fn.code.funcrun = bomb
+        fn.code.funcrun_obj = bomb
 
         w_3 = space.newint(3)
         w_res = space.call_function(fn, w_3)
@@ -137,18 +131,19 @@ def f%s:
     def test_flatcall_method(self):
         space = self.space
 
-        def f(self, a):
-            return a
-        code = PyCode._from_code(self.space, f.func_code)
-        fn = Function(self.space, code, self.space.newdict())
+        src = """
+def f(self, a):
+    return a
+"""
+        fn = self.compile(src)
 
         assert fn.code.fast_natural_arity == 2|PyCode.FLATPYCALL
 
         def bomb(*args):
             assert False, "shortcutting should have avoided this"
 
-        code.funcrun = bomb
-        code.funcrun_obj = bomb
+        fn.code.funcrun = bomb
+        fn.code.funcrun_obj = bomb
 
         w_3 = space.newint(3)
         w_res = space.appexec([fn, w_3], """(f, x):
@@ -165,9 +160,11 @@ def f%s:
     def test_flatcall_default_arg(self):
         space = self.space
 
-        def f(a, b):
-            return a+b
-        code = PyCode._from_code(self.space, f.func_code)
+        src = """
+def f(a, b):
+    return a+b
+"""
+        code = self.compile(src).code
         fn = Function(self.space, code, self.space.newdict(),
                       defs_w=[space.newint(1)])
 
@@ -194,9 +191,11 @@ def f%s:
     def test_flatcall_default_arg_method(self):
         space = self.space
 
-        def f(self, a, b):
-            return a+b
-        code = PyCode._from_code(self.space, f.func_code)
+        src = """
+def f(self, a, b):
+    return a+b
+        """
+        code = self.compile(src).code
         fn = Function(self.space, code, self.space.newdict(),
                       defs_w=[space.newint(1)])
 
@@ -231,5 +230,7 @@ class TestFunction:
         app_g = gateway.interp2app_temp(g)
         space = self.space
         w_g = space.wrap(app_g)
-        w_defs = space.getattr(w_g, space.wrap("func_defaults"))
+        w_defs = space.getattr(w_g, space.wrap("__defaults__"))
         assert space.is_w(w_defs, space.w_None)
+        w_count = space.getattr(w_g, space.wrap("__defaults_count__"))
+        assert space.unwrap(w_count) == 1

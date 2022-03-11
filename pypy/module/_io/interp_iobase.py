@@ -36,34 +36,42 @@ def unsupported(space, message):
 # May be called with any object
 def check_readable_w(space, w_obj):
     if not space.is_true(space.call_method(w_obj, 'readable')):
-        raise oefmt(space.w_IOError, "file or stream is not readable")
+        raise unsupported(space, "File or stream is not readable")
 
 # May be called with any object
 def check_writable_w(space, w_obj):
     if not space.is_true(space.call_method(w_obj, 'writable')):
-        raise oefmt(space.w_IOError, "file or stream is not writable")
+        raise unsupported(space, "File or stream is not writable")
 
 # May be called with any object
 def check_seekable_w(space, w_obj):
     if not space.is_true(space.call_method(w_obj, 'seekable')):
-        raise oefmt(space.w_IOError, "file or stream is not seekable")
-
+        raise unsupported(space, "File or stream is not seekable")
 
 class W_IOBase(W_Root):
+    cffi_fileobj = None    # pypy/module/_cffi_backend
+
     def __init__(self, space, add_to_autoflusher=True):
         # XXX: IOBase thinks it has to maintain its own internal state in
         # `__IOBase_closed` and call flush() by itself, but it is redundant
         # with whatever behaviour a non-trivial derived class will implement.
         self.space = space
-        self.w_dict = space.newdict(instance=True)
+        self.w_dict = None
         self.__IOBase_closed = False
         if add_to_autoflusher:
             get_autoflusher(space).add(self)
-        if self.needs_to_finalize:
+        if self.needs_finalizer():
             self.register_finalizer(space)
 
     def getdict(self, space):
+        if self.w_dict is None:
+            self.w_dict = space.newdict(instance=True)
         return self.w_dict
+
+    def getdictvalue(self, space, attr):
+        if self.w_dict is None:
+            return None
+        return space.finditem_str(self.w_dict, attr)
 
     def _closed(self, space):
         # This gets the derived attribute, which is *not* __IOBase_closed
@@ -74,19 +82,33 @@ class W_IOBase(W_Root):
         return False
 
     def _finalize_(self):
+        # Note: there is only this empty _finalize_() method here, but
+        # we still need register_finalizer() so that descr_del() is
+        # called.  IMPORTANT: this is not the recommended way to have a
+        # finalizer!  It makes the finalizer appear as __del__() from
+        # app-level, and the user can call __del__() explicitly, or
+        # override it, with or without calling the parent's __del__().
+        # This matches 'tp_finalize' in CPython >= 3.4.  So far (3.5),
+        # this is the only built-in class with a 'tp_finalize' slot that
+        # can be subclassed.
+        pass
+
+    def descr_del(self):
         space = self.space
         w_closed = space.findattr(self, space.newtext('closed'))
         try:
             # If `closed` doesn't exist or can't be evaluated as bool, then
             # the object is probably in an unusable state, so ignore.
             if w_closed is not None and not space.is_true(w_closed):
-                space.call_method(self, "close")
+                try:
+                    self._dealloc_warn_w(space, self)
+                finally:
+                    space.call_method(self, "close")
         except OperationError:
             # Silencing I/O errors is bad, but printing spurious tracebacks is
             # equally as bad, and potentially more frequent (because of
             # shutdown issues).
             pass
-    needs_to_finalize = True
 
     def _CLOSED(self):
         # Use this macro whenever you want to check the internal `closed`
@@ -113,10 +135,33 @@ class W_IOBase(W_Root):
     def close_w(self, space):
         if self._CLOSED():
             return
+
+        cffifo = self.cffi_fileobj
+        self.cffi_fileobj = None
+        if cffifo is not None:
+            cffifo.close()
+
         try:
             space.call_method(self, "flush")
         finally:
             self.__IOBase_closed = True
+
+        self.maybe_unregister_rpython_finalizer_io(space)
+
+    def maybe_unregister_rpython_finalizer_io(self, space):
+        from rpython.rlib import rgc
+        if self.user_overridden_class:
+            return
+        rgc.may_ignore_finalizer(self)
+
+    def needs_finalizer(self):
+        # can return False if we know that the precise close() method
+        # of this class will have no effect
+        return True
+
+    def _dealloc_warn_w(self, space, w_source):
+        """Called when the io is implicitly closed via the deconstructor"""
+        pass
 
     def flush_w(self, space):
         if self._CLOSED():
@@ -163,6 +208,9 @@ class W_IOBase(W_Root):
 
     def seekable_w(self, space):
         return space.w_False
+
+    def getstate_w(self, space):
+        raise oefmt(space.w_TypeError, "cannot serialize '%T' object", self)
 
     # ______________________________________________________________
 
@@ -288,7 +336,7 @@ W_IOBase.typedef = TypeDef(
     __enter__ = interp2app(W_IOBase.enter_w),
     __exit__ = interp2app(W_IOBase.exit_w),
     __iter__ = interp2app(W_IOBase.iter_w),
-    next = interp2app(W_IOBase.next_w),
+    __next__ = interp2app(W_IOBase.next_w),
     close = interp2app(W_IOBase.close_w),
     flush = interp2app(W_IOBase.flush_w),
     seek = interp2app(W_IOBase.seek_w),
@@ -304,9 +352,12 @@ W_IOBase.typedef = TypeDef(
     _checkWritable = interp2app(check_writable_w),
     _checkSeekable = interp2app(check_seekable_w),
     _checkClosed = interp2app(W_IOBase.check_closed_w),
-    closed = GetSetProperty(W_IOBase.closed_get_w),
+    closed = GetSetProperty(W_IOBase.closed_get_w,
+                            doc="True if the file is closed"),
     __dict__ = GetSetProperty(descr_get_dict, descr_set_dict, cls=W_IOBase),
     __weakref__ = make_weakref_descr(W_IOBase),
+    __del__ = interp2app(W_IOBase.descr_del),
+    __confirm_applevel_del__ = True,
 
     readline = interp2app(W_IOBase.readline_w),
     readlines = interp2app(W_IOBase.readlines_w),
@@ -327,7 +378,7 @@ class W_RawIOBase(W_IOBase):
         if space.is_w(w_length, space.w_None):
             return w_length
         space.delslice(w_buffer, w_length, space.len(w_buffer))
-        return space.str(w_buffer)
+        return space.call_function(space.w_bytes, w_buffer)
 
     def readall_w(self, space):
         builder = StringBuilder()

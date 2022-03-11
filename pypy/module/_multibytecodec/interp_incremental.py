@@ -49,8 +49,9 @@ class MultibyteIncrementalDecoder(MultibyteIncrementalBase):
             c_codecs.pypy_cjk_dec_free(self.decodebuf)
             self.decodebuf = lltype.nullptr(c_codecs.DECODEBUF_P.TO)
 
-    @unwrap_spec(object='bytes', final=bool)
-    def decode_w(self, object, final=False):
+    @unwrap_spec(object='bufferstr', final=int)
+    def decode_w(self, object, final=0):
+        final = bool(final)
         space = self.space
         state = space.fromcache(CodecState)
         if len(self.pending) > 0:

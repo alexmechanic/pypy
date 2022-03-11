@@ -105,7 +105,8 @@ class TestInstance(BaseTestPyPyC):
         # -------------------------------
         entry_bridge, = log.loops_by_filename(self.filepath, is_entry_bridge=True)
         ops = entry_bridge.ops_by_id('mutate', opcode='LOAD_ATTR')
-        assert log.opnames(ops) == ['guard_value', 'guard_not_invalidated',
+        assert log.opnames(ops) == ['guard_value',
+                                    'guard_not_invalidated',
                                     'getfield_gc_i']
         # the STORE_ATTR is folded away
         assert list(entry_bridge.ops_by_id('meth1', opcode='STORE_ATTR')) == []
@@ -153,7 +154,8 @@ class TestInstance(BaseTestPyPyC):
         # -------------------------------
         entry_bridge, = log.loops_by_filename(self.filepath, is_entry_bridge=True)
         ops = entry_bridge.ops_by_id('mutate', opcode='LOAD_ATTR')
-        assert log.opnames(ops) == ['guard_value', 'guard_not_invalidated',
+        assert log.opnames(ops) == ['guard_value',
+                                    'guard_not_invalidated',
                                     'getfield_gc_r', 'guard_nonnull_class',
                                     'getfield_gc_r', 'guard_value', # type check on the attribute
                                     ]
@@ -186,78 +188,6 @@ class TestInstance(BaseTestPyPyC):
             jump(..., descr=...)
 
         """)
-
-    def test_oldstyle_methcall(self):
-        def main():
-            def g(): pass
-            class A:
-                def f(self):
-                    return self.x + 1
-            class I(A):
-                pass
-            class J(I):
-                pass
-
-
-            class B(J):
-                def __init__(self, x):
-                    self.x = x
-
-            i = 0
-            b = B(1)
-            while i < 1000:
-                g()
-                v = b.f() # ID: meth
-                i += v
-            return i
-
-        log = self.run(main, [], threshold=80)
-        loop, = log.loops_by_filename(self.filepath, is_entry_bridge=True)
-        assert loop.match_by_id('meth',
-        '''
-    guard_nonnull_class(p18, ..., descr=...)
-    p52 = getfield_gc_r(p18, descr=...) # read map
-    guard_value(p52, ConstPtr(ptr53), descr=...)
-    p54 = getfield_gc_r(p18, descr=...) # read class
-    guard_value(p54, ConstPtr(ptr55), descr=...)
-    p56 = force_token() # done
-        ''')
-
-
-    def test_oldstyle_newstyle_mix(self):
-        def main():
-            class A:
-                pass
-
-            class B(object, A):
-                def __init__(self, x):
-                    self.x = x
-
-            i = 0
-            B("abc") # prevent field unboxing
-            b = B(1)
-            while i < 100:
-                v = b.x # ID: loadattr1
-                v = b.x # ID: loadattr2
-                i += v
-            return i
-
-        log = self.run(main, [], threshold=80)
-        loop, = log.loops_by_filename(self.filepath)
-        assert loop.match_by_id('loadattr1',
-        '''
-        guard_not_invalidated(descr=...)
-        i19 = call_i(ConstClass(ll_call_lookup_function), _, _, _, 0, descr=...)
-        guard_no_exception(descr=...)
-        i22 = int_lt(i19, 0)
-        guard_true(i22, descr=...)
-        i26 = call_i(ConstClass(ll_call_lookup_function), _, _, _, 0, descr=...)
-        guard_no_exception(descr=...)
-        i29 = int_lt(i26, 0)
-        guard_true(i29, descr=...)
-        guard_nonnull_class(p58, ConstClass(W_IntObject), descr=...)
-        ''')
-        assert loop.match_by_id('loadattr2', "")   # completely folded away
 
     def test_python_contains(self):
         def main():
@@ -323,6 +253,39 @@ class TestInstance(BaseTestPyPyC):
             jump(..., descr=...)
         """)
 
+    def test_super_no_args(self):
+        def main():
+            class A(object):
+                def m(self, x):
+                    return x + 1
+            class B(A):
+                def m(self, x):
+                    return super().m(x)
+            i = 0
+            while i < 300:
+                i = B().m(i)
+            return i
+
+        log = self.run(main, [])
+        loop, = log.loops_by_filename(self.filepath)
+        assert loop.match("""
+            i78 = int_lt(i72, 300)
+            guard_true(i78, descr=...)
+            guard_not_invalidated(descr=...)
+            p1 = force_token()
+            p65 = force_token()
+            p3 = force_token()
+            i81 = int_add(i72, 1)
+
+            # can't use TICK here, because of the extra setfield_gc
+            ticker0 = getfield_raw_i(#, descr=<FieldS pypysig_long_struct.c_value .*>)
+            setfield_gc(p0, p65, descr=<FieldP pypy.interpreter.pyframe.PyFrame.vable_token .>)
+            ticker_cond0 = int_lt(ticker0, 0)
+            guard_false(ticker_cond0, descr=...)
+
+            jump(..., descr=...)
+        """)
+
     def test_float_instance_field_read(self):
         def main():
             class A(object):
@@ -379,28 +342,4 @@ class TestInstance(BaseTestPyPyC):
             guard_false(i71, descr=...)
 """)
 
-
-    def test_namedtuple_construction(self):
-        def main():
-            from collections import namedtuple
-            A = namedtuple("A", "x y")
-            res = 0
-            i = 0
-            while i < 2000:
-                res += A(i, 0).x
-                i += 1
-        log = self.run(main, [])
-        loop, = log.loops_by_filename(self.filepath)
-        assert loop.match("""
-            i7 = int_lt(i5, 2000)
-            guard_true(i7, descr=...)
-            guard_not_invalidated(descr=...)
-            p1 = force_token()
-            p2 = force_token()
-            i20 = int_add_ovf(i19, i5)
-            guard_no_overflow(descr=...)
-            i9 = int_add(i5, 1)
-            --TICK--
-            jump(..., descr=...)
-        """)
 

@@ -18,6 +18,8 @@ from pypy.interpreter.pyparser.pylexer import *
 from pypy.interpreter.pyparser.automata import NonGreedyDFA, DFA, DEFAULT
 from pypy.interpreter.pyparser import pytoken
 
+NON_ASCII = "\x80"
+
 def makePyPseudoDFA ():
     import string
     states = []
@@ -51,68 +53,86 @@ def makePyPseudoDFA ():
     # ____________________________________________________________
     # Names
     name = chain(states,
-                 groupStr(states, string.letters + "_"),
+                 groupStr(states, string.letters + "_" + NON_ASCII),
                  any(states, groupStr(states,
-                                      string.letters + string.digits + "_")))
+                                      string.letters + string.digits + "_" +
+                                      NON_ASCII)))
     # ____________________________________________________________
     # Digits
     def makeDigits ():
         return groupStr(states, "0123456789")
+    def makeDigitsChain (digits="0123456789", first=None,
+                         allow_leading_underscore=False):
+        if first is None:
+            first = digits
+        if allow_leading_underscore:
+            return group(states,
+                         makeDigitsChain(digits=digits),
+                         chain(states,
+                               newArcPair(states, "_"),
+                               makeDigitsChain(digits=digits)))
+        return chain(states,
+                     groupStr(states, first),
+                     any(states, groupStr(states, digits)),
+                     any(states,
+                         chain(states,
+                               newArcPair(states, "_"),
+                               atleastonce(states, groupStr(states, digits)))))
+
     # ____________________________________________________________
     # Integer numbers
     hexNumber = chain(states,
                       newArcPair(states, "0"),
                       groupStr(states, "xX"),
-                      atleastonce(states,
-                                  groupStr(states, "0123456789abcdefABCDEF")),
-                      maybe(states, groupStr(states, "lL")))
+                      makeDigitsChain("0123456789abcdefABCDEF",
+                                      allow_leading_underscore=True))
     octNumber = chain(states,
                       newArcPair(states, "0"),
-                      maybe(states,
-                            chain(states,
-                                  groupStr(states, "oO"),
-                                  groupStr(states, "01234567"))),
-                      any(states, groupStr(states, "01234567")),
-                      maybe(states, groupStr(states, "lL")))
+                      groupStr(states, "oO"),
+                      makeDigitsChain("01234567",
+                                      allow_leading_underscore=True))
     binNumber = chain(states,
                       newArcPair(states, "0"),
                       groupStr(states, "bB"),
-                      atleastonce(states, groupStr(states, "01")),
-                      maybe(states, groupStr(states, "lL")))
-    decNumber = chain(states,
-                      groupStr(states, "123456789"),
-                      any(states, makeDigits()),
-                      maybe(states, groupStr(states, "lL")))
-    intNumber = group(states, hexNumber, octNumber, binNumber, decNumber)
+                      makeDigitsChain("01",
+                                      allow_leading_underscore=True))
+    decNumber = makeDigitsChain(first="123456789")
+    zero = makeDigitsChain("0")
+    intNumber = group(states, hexNumber, octNumber, binNumber, decNumber, zero)
     # ____________________________________________________________
     # Exponents
     def makeExp ():
         return chain(states,
                      groupStr(states, "eE"),
                      maybe(states, groupStr(states, "+-")),
-                     atleastonce(states, makeDigits()))
+                     makeDigitsChain())
+
     # ____________________________________________________________
     # Floating point numbers
+    def makePointFloat ():
+        return group(states,
+                           chain(states,
+                                 makeDigitsChain(),
+                                 newArcPair(states, "."),
+                                 any(states, makeDigitsChain())),
+                           chain(states,
+                                 newArcPair(states, "."),
+                                 makeDigitsChain()))
     def makeFloat ():
-        pointFloat = chain(states,
-                           group(states,
-                                 chain(states,
-                                       atleastonce(states, makeDigits()),
-                                       newArcPair(states, "."),
-                                       any(states, makeDigits())),
-                                 chain(states,
-                                       newArcPair(states, "."),
-                                       atleastonce(states, makeDigits()))),
-                           maybe(states, makeExp()))
+        pointFloat = group(states,
+                           makePointFloat(),
+                           chain(states,
+                                 makePointFloat(),
+                                 makeExp()))
         expFloat = chain(states,
-                         atleastonce(states, makeDigits()),
+                         makeDigitsChain(),
                          makeExp())
         return group(states, pointFloat, expFloat)
     # ____________________________________________________________
     # Imaginary numbers
     imagNumber = group(states,
                        chain(states,
-                             atleastonce(states, makeDigits()),
+                             makeDigitsChain(),
                              groupStr(states, "jJ")),
                        chain(states,
                              makeFloat(),
@@ -136,9 +156,14 @@ def makePyPseudoDFA ():
     funny = group(states, *funny)
     # ____________________________________________________________
     def makeStrPrefix ():
-        return chain(states,
-                     maybe(states, groupStr(states, "uUbB")),
-                     maybe(states, groupStr(states, "rR")))
+        return group(states,
+                     chain(states,
+                           maybe(states, groupStr(states, "rR")),
+                           maybe(states, groupStr(states, "bBfF"))),
+                     chain(states,
+                           maybe(states, groupStr(states, "bBfF")),
+                           maybe(states, groupStr(states, "rR"))),
+                     maybe(states, groupStr(states, "uU")))
     # ____________________________________________________________
     contStr = group(states,
                     chain(states,
@@ -247,20 +272,10 @@ def makePyEndDFAMap ():
     states, accepts = nfaToDfa(states, *double3)
     double3DFA = NonGreedyDFA(states, accepts)
     states_double3DFA = states
-    map = {"'" : (singleDFA, states_singleDFA),
-           '"' : (doubleDFA, states_doubleDFA),
-           "r" : None,
-           "R" : None,
-           "u" : None,
-           "U" : None,
-           "b" : None,
-           "B" : None}
-    for uniPrefix in ("", "u", "U", "b", "B", ):
-        for rawPrefix in ("", "r", "R"):
-            prefix = uniPrefix + rawPrefix
-            map[prefix + "'''"] = (single3DFA, states_single3DFA)
-            map[prefix + '"""'] = (double3DFA, states_double3DFA)
-    return map
+    return {"'" : (singleDFA, states_singleDFA),
+            '"' : (doubleDFA, states_doubleDFA),
+            "'''": (single3DFA, states_single3DFA),
+            '"""': (double3DFA, states_double3DFA)}
 
 # ______________________________________________________________________
 
@@ -281,7 +296,7 @@ def output(name, dfa_class, dfa, states):
     for numstate, state in enumerate(states):
         lines.append("    # ")
         lines.append(str(numstate))
-        lines.append('\n')
+        lines.append("\n")
         s = StringIO.StringIO()
         i = 0
         for k, v in sorted(state.items()):

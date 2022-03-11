@@ -1,3 +1,4 @@
+import sys
 from pypy.interpreter.mixedmodule import MixedModule
 
 class Module(MixedModule):
@@ -7,7 +8,7 @@ class Module(MixedModule):
 
     interpleveldefs = {
         'DEFAULT_BUFFER_SIZE': 'space.wrap(interp_iobase.DEFAULT_BUFFER_SIZE)',
-        'BlockingIOError': 'interp_io.W_BlockingIOError',
+        'BlockingIOError': 'space.w_BlockingIOError',
         'UnsupportedOperation':
             'space.fromcache(interp_io.Cache).w_unsupportedoperation',
         '_IOBase': 'interp_iobase.W_IOBase',
@@ -25,8 +26,11 @@ class Module(MixedModule):
         'TextIOWrapper': 'interp_textio.W_TextIOWrapper',
 
         'open': 'interp_io.open',
+        'open_code': 'interp_io.open_code',
         'IncrementalNewlineDecoder': 'interp_textio.W_IncrementalNewlineDecoder',
     }
+    if sys.platform == 'win32':
+        interpleveldefs['_WindowsConsoleIO'] = 'interp_win32consoleio.W_WinConsoleIO'
 
     def shutdown(self, space):
         # at shutdown, flush all open streams.  Ignore I/O errors.

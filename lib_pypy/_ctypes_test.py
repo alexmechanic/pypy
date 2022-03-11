@@ -4,7 +4,7 @@ import os
 try:
     import cpyext
 except ImportError:
-    raise ImportError("No module named '_ctypes_test'")
+    raise ModuleNotFoundError("No module named '_ctypes_test'", name='_ctypes_test')
 try:
     import _ctypes
     _ctypes.PyObj_FromPtr = None
@@ -19,7 +19,7 @@ else:
     try:
         fp, filename, description = imp.find_module('_ctypes_test', path=[output_dir])
         with fp:
-            imp.load_module('_ctypes_test', fp, filename, description)
+            mod = imp.load_module('_ctypes_test', fp, filename, description)
     except ImportError:
         if os.name == 'nt':
             # hack around finding compilers on win32
@@ -27,5 +27,9 @@ else:
                 import setuptools
             except ImportError:
                 pass
-        print('could not find _ctypes_test in %s' % output_dir)
-        _pypy_testcapi.compile_shared('_ctypes_test.c', '_ctypes_test', output_dir)
+        mod = _pypy_testcapi.compile_shared(cfile, '_ctypes_test', output_dir)
+        fp, filename, description = imp.find_module('_ctypes_test', path=[output_dir])
+    # importing via load_module skips setting the __file__
+    mod.__file__ = filename
+    
+

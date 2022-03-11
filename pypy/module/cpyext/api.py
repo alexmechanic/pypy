@@ -14,21 +14,24 @@ from rpython.rlib.objectmodel import dont_inline
 from rpython.rlib.rfile import (FILEP, c_fread, c_fclose, c_fwrite,
         c_fdopen, c_fileno, c_ferror,
         c_fopen)# for tests
+from rpython.rlib import jit, rutf8
+from rpython.rlib.rarithmetic import widen
 from rpython.translator import cdir
 from rpython.translator.tool.cbuild import ExternalCompilationInfo
 from rpython.translator.gensupp import NameManager
 from rpython.tool.udir import udir
 from pypy.module.cpyext.state import State
-from pypy.interpreter.error import OperationError, oefmt
+from pypy.interpreter.error import OperationError, oefmt, raise_import_error
 from pypy.interpreter.baseobjspace import W_Root
 from pypy.interpreter.gateway import unwrap_spec
 from pypy.interpreter.nestedscope import Cell
 from pypy.interpreter.module import Module
 from pypy.interpreter.function import StaticMethod
+from pypy.interpreter.pyparser import pygram
 from pypy.objspace.std.sliceobject import W_SliceObject
+from pypy.objspace.std.unicodeobject import encode_object
 from pypy.module.__builtin__.descriptor import W_Property
-from pypy.module.__builtin__.interp_classobj import W_ClassObject
-from pypy.module.micronumpy.base import W_NDimArray
+#from pypy.module.micronumpy.base import W_NDimArray
 from pypy.module.__pypy__.interp_buffer import W_Bufferable
 from rpython.rlib.entrypoint import entrypoint_lowlevel
 from rpython.rlib.rposix import SuppressIPH
@@ -45,9 +48,16 @@ from pypy.objspace.std.typeobject import W_TypeObject, find_best_base
 from rpython.tool.cparser import CTypeSpace
 
 DEBUG_WRAPPER = True
+if sys.platform == 'win32':
+    dash = '_'
+    WIN32 = True
+else:
+    dash = ''
+    WIN32 = False
 
 pypydir = py.path.local(pypydir)
 include_dir = pypydir / 'module' / 'cpyext' / 'include'
+pc_dir = pypydir / 'module' / 'cpyext' / 'PC'
 parse_dir = pypydir / 'module' / 'cpyext' / 'parse'
 source_dir = pypydir / 'module' / 'cpyext' / 'src'
 translator_c_dir = py.path.local(cdir)
@@ -57,6 +67,8 @@ include_dirs = [
     translator_c_dir,
     udir,
     ]
+if WIN32:
+    include_dirs.insert(0, pc_dir)
 
 configure_eci = ExternalCompilationInfo(
         include_dirs=include_dirs,
@@ -90,14 +102,6 @@ assert CONST_WSTRING == rffi.CWCHARP
 
 # FILE* interface
 
-if sys.platform == 'win32':
-    dash = '_'
-    WIN32 = True
-else:
-    dash = ''
-    WIN32 = False
-
-
 def fclose(fp):
     try:
         with SuppressIPH():
@@ -128,20 +132,26 @@ udir.join(pypy_decl).write("/* Will be filled later */\n")
 udir.join('pypy_structmember_decl.h').write("/* Will be filled later */\n")
 udir.join('pypy_marshal_decl.h').write("/* Will be filled later */\n")
 udir.join('pypy_macros.h').write("/* Will be filled later */\n")
+udir.join('genericaliasobject.h').write("/* Will be filled later */\n")
 
 constant_names = """
-Py_TPFLAGS_READY Py_TPFLAGS_READYING Py_TPFLAGS_HAVE_GETCHARBUFFER
+Py_TPFLAGS_READY Py_TPFLAGS_READYING
 METH_COEXIST METH_STATIC METH_CLASS Py_TPFLAGS_BASETYPE
-METH_NOARGS METH_VARARGS METH_KEYWORDS METH_O Py_TPFLAGS_HAVE_INPLACEOPS
-Py_TPFLAGS_HEAPTYPE Py_TPFLAGS_HAVE_CLASS Py_TPFLAGS_HAVE_NEWBUFFER
-Py_LT Py_LE Py_EQ Py_NE Py_GT Py_GE Py_TPFLAGS_CHECKTYPES Py_MAX_NDIMS
-PyBUF_FORMAT PyBUF_ND PyBUF_STRIDES PyBUF_WRITABLE PyBUF_READ PyBUF_WRITE
+METH_NOARGS METH_VARARGS METH_KEYWORDS METH_FASTCALL METH_O
+Py_TPFLAGS_HEAPTYPE METH_METHOD
+Py_LT Py_LE Py_EQ Py_NE Py_GT Py_GE Py_MAX_NDIMS
+Py_CLEANUP_SUPPORTED PyBUF_READ
+PyBUF_FORMAT PyBUF_ND PyBUF_STRIDES PyBUF_WRITABLE PyBUF_SIMPLE PyBUF_WRITE
 PY_SSIZE_T_MAX PY_SSIZE_T_MIN
 """.split()
 
-for name in ('INT', 'LONG', 'LIST', 'TUPLE', 'UNICODE', 'DICT', 'BASE_EXC',
-             'TYPE', 'STRING'): # 'STRING' -> 'BYTES' in py3
+for name in ('LONG', 'LIST', 'TUPLE', 'UNICODE', 'DICT', 'BASE_EXC',
+             'TYPE', 'BYTES'):
     constant_names.append('Py_TPFLAGS_%s_SUBCLASS' % name)
+
+#pystrtod.h flags
+for name in ('SIGN', 'ADD_DOT_0', 'ALT'):
+    constant_names.append('Py_DTSF_%s' % name)
 
 # PyPy-specific flags
 for name in ('FLOAT',):
@@ -167,7 +177,7 @@ def copy_header_files(cts, dstdir, copy_numpy_headers):
     # XXX: 20 lines of code to recursively copy a directory, really??
     assert dstdir.check(dir=True)
     headers = include_dir.listdir('*.h') + include_dir.listdir('*.inl')
-    for name in ["pypy_macros.h"] + FUNCTIONS_BY_HEADER.keys():
+    for name in ["pypy_macros.h", "graminit.h"] + FUNCTIONS_BY_HEADER.keys():
         headers.append(udir.join(name))
     for path in cts.parsed_headers:
         headers.append(path)
@@ -184,6 +194,11 @@ def copy_header_files(cts, dstdir, copy_numpy_headers):
         numpy_include_dir = include_dir / '_numpypy' / 'numpy'
         numpy_headers = numpy_include_dir.listdir('*.h') + numpy_include_dir.listdir('*.inl')
         _copy_header_files(numpy_headers, numpy_dstdir)
+    if WIN32:
+        # Override pyconfig.h with the one for windows
+        PC_dir = pypydir / 'module' / 'cpyext' / 'PC'
+        headers = PC_dir.listdir('*.h')
+        _copy_header_files(headers, dstdir)
 
 
 class NotSpecified(object):
@@ -333,6 +348,9 @@ class ApiFunction(BaseApiFunction):
         self.gil = gil
         self.result_borrowed = result_borrowed
         self.result_is_ll = result_is_ll
+
+    def __repr__(self):
+        return "<cpyext function %s>" % (self.callable.__name__,)
 
     def _freeze_(self):
         return True
@@ -569,14 +587,15 @@ FUNCTIONS_BY_HEADER = defaultdict(dict)
 
 # These are C symbols which cpyext will export, but which are defined in .c
 # files somewhere in the implementation of cpyext (rather than being defined in
-# RPython).
+# RPython). Their name will be mangled by a #define
 SYMBOLS_C = [
     'Py_FatalError', 'PyOS_snprintf', 'PyOS_vsnprintf', 'PyArg_Parse',
     'PyArg_ParseTuple', 'PyArg_UnpackTuple', 'PyArg_ParseTupleAndKeywords',
     'PyArg_VaParse', 'PyArg_VaParseTupleAndKeywords', '_PyArg_NoKeywords',
-    'PyString_FromFormat', 'PyString_FromFormatV',
-    'PyUnicode_FromFormat', 'PyUnicode_FromFormatV',
+    'PyUnicode_FromFormat', 'PyUnicode_FromFormatV', 'PyUnicode_AsWideCharString',
+    'PyUnicode_GetSize', 'PyUnicode_GetLength', 'PyUnicode_FromWideChar',
     'PyModule_AddObject', 'PyModule_AddIntConstant', 'PyModule_AddStringConstant',
+    'PyModule_GetDef', 'PyModuleDef_Init', 'PyModule_GetState',
     'Py_BuildValue', 'Py_VaBuildValue', 'PyTuple_Pack',
     '_PyArg_Parse_SizeT', '_PyArg_ParseTuple_SizeT',
     '_PyArg_ParseTupleAndKeywords_SizeT', '_PyArg_VaParse_SizeT',
@@ -584,6 +603,7 @@ SYMBOLS_C = [
     '_Py_BuildValue_SizeT', '_Py_VaBuildValue_SizeT',
 
     'PyErr_Format', 'PyErr_NewException', 'PyErr_NewExceptionWithDoc',
+    'PyErr_WarnFormat', '_PyErr_FormatFromCause',
     'PySys_WriteStdout', 'PySys_WriteStderr',
 
     'PyEval_CallFunction', 'PyEval_CallMethod', 'PyObject_CallFunction',
@@ -591,14 +611,7 @@ SYMBOLS_C = [
     '_PyObject_CallFunction_SizeT', '_PyObject_CallMethod_SizeT',
 
     'PyObject_DelItemString', 'PyObject_GetBuffer', 'PyBuffer_Release',
-
-    'PyBuffer_FromMemory', 'PyBuffer_FromReadWriteMemory',
-    'PyBuffer_FromObject', 'PyBuffer_FromReadWriteObject', 'PyBuffer_New',
-    'PyBuffer_Type', '_Py_get_buffer_type', '_Py_setfilesystemdefaultencoding',
-
-    'PyCObject_FromVoidPtr', 'PyCObject_FromVoidPtrAndDesc', 'PyCObject_AsVoidPtr',
-    'PyCObject_GetDesc', 'PyCObject_Import', 'PyCObject_SetVoidPtr',
-    'PyCObject_Type', '_Py_get_cobject_type',
+    '_Py_setfilesystemdefaultencoding',
 
     'PyCapsule_New', 'PyCapsule_IsValid', 'PyCapsule_GetPointer',
     'PyCapsule_GetName', 'PyCapsule_GetDestructor', 'PyCapsule_GetContext',
@@ -610,7 +623,10 @@ SYMBOLS_C = [
     'PyObject_AsReadBuffer', 'PyObject_AsWriteBuffer', 'PyObject_CheckReadBuffer',
     'PyBuffer_GetPointer', 'PyBuffer_ToContiguous', 'PyBuffer_FromContiguous',
 
+    'PyImport_ImportModuleLevel',
+
     'PyOS_getsig', 'PyOS_setsig',
+    '_Py_RestoreSignals',
     'PyThread_get_thread_ident', 'PyThread_allocate_lock', 'PyThread_free_lock',
     'PyThread_acquire_lock', 'PyThread_release_lock',
     'PyThread_create_key', 'PyThread_delete_key', 'PyThread_set_key_value',
@@ -618,20 +634,33 @@ SYMBOLS_C = [
     'PyThread_ReInitTLS', 'PyThread_init_thread',
     'PyThread_start_new_thread',
 
-    'PyStructSequence_InitType', 'PyStructSequence_New',
-    'PyStructSequence_UnnamedField',
+    'PyStructSequence_InitType', 'PyStructSequence_InitType2',
+    'PyStructSequence_New', 'PyStructSequence_UnnamedField',
+    'PyStructSequence_NewType',
 
     'PyFunction_Type', 'PyMethod_Type', 'PyRange_Type', 'PyTraceBack_Type',
 
-    'Py_UseClassExceptionsFlag', 'Py_FrozenFlag', # not part of sys.flags
+    'Py_FrozenFlag', # not part of sys.flags
+    'Py_UnbufferedStdioFlag',  # not part of sys.flags (python3)
     '_Py_PackageContext', 'PyOS_InputHook',
-    '_PyTraceMalloc_Track', '_PyTraceMalloc_Untrack', 'PyMem_Malloc',
-    'PyObject_Free', 'PyObject_GC_Del', 'PyType_GenericAlloc',
+    '_Py_PackageContext',
+
+    'PyMem_RawMalloc', 'PyMem_RawCalloc', 'PyMem_RawRealloc', 'PyMem_RawFree',
+    'PyMem_Malloc', 'PyMem_Calloc', 'PyMem_Realloc', 'PyMem_Free',
+    'PyObject_CallFinalizerFromDealloc',
+    'PyTraceMalloc_Track', 'PyTraceMalloc_Untrack',
+    'PyBytes_FromFormat', 'PyBytes_FromFormatV',
+
+    'PyType_FromSpec', 'PyType_GetModule', 'PyType_GetModuleState',
+    'Py_IncRef', 'Py_DecRef', 'PyObject_Free', 'PyObject_GC_Del', 'PyType_GenericAlloc',
     '_PyObject_New', '_PyObject_NewVar',
     '_PyObject_GC_Malloc', '_PyObject_GC_New', '_PyObject_GC_NewVar',
-    'PyObject_Init', 'PyObject_InitVar', 'PyInt_FromLong',
+    'PyObject_Init', 'PyObject_InitVar',
     'PyTuple_New', '_Py_Dealloc',
+    'PyVectorcall_Call',
 ]
+if sys.platform == "win32":
+    SYMBOLS_C.append('Py_LegacyWindowsStdioFlag')
 TYPES = {}
 FORWARD_DECLS = []
 INIT_FUNCTIONS = []
@@ -642,9 +671,6 @@ BOOTSTRAP_FUNCTIONS = []
 _flags = [
     # c name, sys.flags name
     ('Py_DebugFlag', 'debug'),
-    ('Py_Py3kWarningFlag', 'py3k_warning'),
-    ('Py_DivisionWarningFlag', 'division_warning'),
-    ('_Py_QnewFlag', 'division_new'),
     ('Py_InspectFlag', 'inspect'),
     ('Py_InteractiveFlag', 'interactive'),
     ('Py_OptimizeFlag', 'optimize'),
@@ -652,11 +678,11 @@ _flags = [
     ('Py_NoUserSiteDirectory', 'no_user_site'),
     ('Py_NoSiteFlag', 'no_site'),
     ('Py_IgnoreEnvironmentFlag', 'ignore_environment'),
-    ('Py_TabcheckFlag', 'tabcheck'),
     ('Py_VerboseFlag', 'verbose'),
-    ('Py_UnicodeFlag', 'unicode'),
     ('Py_BytesWarningFlag', 'bytes_warning'),
+    ('Py_QuietFlag', 'quiet'),
     ('Py_HashRandomizationFlag', 'hash_randomization'),
+    ('Py_IsolatedFlag', 'isolated'),
 ]
 
 SYMBOLS_C += [c_name for c_name, _ in _flags]
@@ -665,9 +691,9 @@ SYMBOLS_C += [c_name for c_name, _ in _flags]
 register_global('_Py_NoneStruct',
     'PyObject*', 'space.w_None', header=pypy_decl)
 register_global('_Py_TrueStruct',
-    'PyIntObject*', 'space.w_True', header=pypy_decl)
-register_global('_Py_ZeroStruct',
-    'PyIntObject*', 'space.w_False', header=pypy_decl)
+    'PyObject*', 'space.w_True', header=pypy_decl)
+register_global('_Py_FalseStruct',
+    'PyObject*', 'space.w_False', header=pypy_decl)
 register_global('_Py_NotImplementedStruct',
     'PyObject*', 'space.w_NotImplemented', header=pypy_decl)
 register_global('_Py_EllipsisObject',
@@ -684,6 +710,10 @@ def build_exported_objects():
     from pypy.module.exceptions.moduledef import Module as ExcModule
     all_exceptions = list(ExcModule.interpleveldefs)
     for exc_name in all_exceptions:
+        if exc_name in ('EnvironmentError', 'IOError', 'WindowsError'):
+            # FIXME: aliases of OSError cause a clash of names via
+            # export_struct
+            continue
         register_global('PyExc_' + exc_name,
             'PyTypeObject*',
             'space.gettypeobject(interp_exceptions.W_%s.typedef)'% (exc_name, ))
@@ -691,30 +721,27 @@ def build_exported_objects():
     # Common types with their own struct
     for cpyname, pypyexpr in {
         "PyType_Type": "space.w_type",
-        "PyString_Type": "space.w_bytes",
+        "PyBytes_Type": "space.w_bytes",
         "PyUnicode_Type": "space.w_unicode",
-        "PyBaseString_Type": "space.w_basestring",
         "PyDict_Type": "space.w_dict",
-        "PyDictProxy_Type": "cpyext.dictobject.make_frozendict(space)",
+        "PyDictProxy_Type": 'space.gettypeobject(cpyext.dictproxyobject.W_DictProxyObject.typedef)',
         "PyTuple_Type": "space.w_tuple",
         "PyList_Type": "space.w_list",
         "PySet_Type": "space.w_set",
         "PyFrozenSet_Type": "space.w_frozenset",
-        "PyInt_Type": "space.w_int",
         "PyBool_Type": "space.w_bool",
         "PyFloat_Type": "space.w_float",
-        "PyLong_Type": "space.w_long",
+        "PyLong_Type": "space.w_int",
         "PyComplex_Type": "space.w_complex",
         "PyByteArray_Type": "space.w_bytearray",
         "PyMemoryView_Type": "space.w_memoryview",
         "PyBaseObject_Type": "space.w_object",
-        'PyNone_Type': 'space.type(space.w_None)',
-        'PyNotImplemented_Type': 'space.type(space.w_NotImplemented)',
+        '_PyNone_Type': 'space.type(space.w_None)',
+        '_PyNotImplemented_Type': 'space.type(space.w_NotImplemented)',
         'PyCell_Type': 'space.gettypeobject(Cell.typedef)',
         'PyModule_Type': 'space.gettypeobject(Module.typedef)',
         'PyProperty_Type': 'space.gettypeobject(W_Property.typedef)',
         'PySlice_Type': 'space.gettypeobject(W_SliceObject.typedef)',
-        'PyClass_Type': 'space.gettypeobject(W_ClassObject.typedef)',
         'PyStaticMethod_Type': 'space.gettypeobject(StaticMethod.typedef)',
         'PyCFunction_Type': 'space.gettypeobject(cpyext.methodobject.W_PyCFunctionObject.typedef)',
         'PyClassMethodDescr_Type': 'space.gettypeobject(cpyext.methodobject.W_PyCClassMethodObject.typedef)',
@@ -722,12 +749,13 @@ def build_exported_objects():
         'PyMemberDescr_Type': 'space.gettypeobject(cpyext.typeobject.W_MemberDescr.typedef)',
         'PyMethodDescr_Type': 'space.gettypeobject(cpyext.methodobject.W_PyCMethodObject.typedef)',
         'PyWrapperDescr_Type': 'space.gettypeobject(cpyext.methodobject.W_PyCWrapperObject.typedef)',
+        'PyInstanceMethod_Type': 'space.gettypeobject(cpyext.classobject.InstanceMethod.typedef)',
         'PyBufferable_Type': 'space.gettypeobject(W_Bufferable.typedef)',
         }.items():
         register_global(cpyname, 'PyTypeObject*', pypyexpr, header=pypy_decl)
 
     for cpyname in '''PyMethodObject PyListObject PyLongObject
-                      PyClassObject PyBaseExceptionObject'''.split():
+                      PyBaseExceptionObject'''.split():
         FORWARD_DECLS.append('typedef struct { PyObject_HEAD } %s'
                              % (cpyname, ))
 build_exported_objects()
@@ -743,8 +771,26 @@ class CpyextTypeSpace(CTypeSpace):
         return decorate
 
 
-CPYEXT_BASE_HEADERS = ['sys/types.h', 'stdarg.h', 'stdio.h', 'stddef.h']
-cts = CpyextTypeSpace(headers=CPYEXT_BASE_HEADERS)
+CPYEXT_BASE_HEADERS = ['sys/types.h', 'stdarg.h', 'stdio.h',
+                       'stddef.h', 'pyport.h']
+
+# Subtle. There are two pyconfig.h, one in PC (for windows, includes a pragma
+# to link python*.lib), one in include. The dirs in include_dir purposely avoid
+# the one in PC, since at this stage python*.lib may not exist.
+# copy_header_files() will use the PC one on windows, which will then be used
+# for all translated c-extension compilation
+
+cts = CpyextTypeSpace(headers=CPYEXT_BASE_HEADERS, include_dirs = [include_dir])
+# Ideally, we would parse pyport.h but that is beyond the parser.
+cts.parse_source("""
+#ifdef _WIN64
+typedef long long Py_ssize_t;
+typedef long long Py_hash_t;
+#else
+typedef long Py_ssize_t;
+typedef long Py_hash_t;
+#endif
+""", configure=False)
 cts.parse_header(parse_dir / 'cpyext_object.h', configure=False)
 cts.parse_header(parse_dir / 'cpyext_descrobject.h', configure=False)
 cts.configure_types()
@@ -761,6 +807,7 @@ PyTypeObject = cts.gettype('PyTypeObject')
 PyTypeObjectPtr = cts.gettype('PyTypeObject *')
 PyObjectStruct = cts.gettype('PyObject')
 PyObject = cts.gettype('PyObject *')
+PyObjectC = cts.gettype('PyObject const *')
 PyObjectFields = (("ob_refcnt", lltype.Signed),
                   ("ob_pypy_link", lltype.Signed),
                   ("ob_type", PyTypeObjectPtr))
@@ -854,7 +901,7 @@ def build_type_checkers_flags(type_name, cls=None, flagsubstr=None):
         from pypy.module.cpyext.pyobject import is_pyobj, as_pyobj
         "Implements the Py_Xxx_Check function"
         if is_pyobj(pto):
-            return (pto.c_ob_type.c_tp_flags & tp_flag) == tp_flag
+            return (widen(pto.c_ob_type.c_tp_flags) & tp_flag) == tp_flag
         w_obj_type = space.type(pto)
         w_type = get_w_type(space)
         return (space.is_w(w_obj_type, w_type) or
@@ -1113,12 +1160,6 @@ def setup_init_functions(eci, prefix):
     # of the cpyext module.  The C functions are called with no wrapper,
     # but must not do anything like calling back PyType_Ready().  We
     # use them just to get a pointer to the PyTypeObjects defined in C.
-    get_buffer_type = rffi.llexternal('_%s_get_buffer_type' % prefix,
-                                      [], PyTypeObjectPtr,
-                                      compilation_info=eci, _nowrapper=True)
-    get_cobject_type = rffi.llexternal('_%s_get_cobject_type' % prefix,
-                                       [], PyTypeObjectPtr,
-                                       compilation_info=eci, _nowrapper=True)
     get_capsule_type = rffi.llexternal('_%s_get_capsule_type' % prefix,
                                        [], PyTypeObjectPtr,
                                        compilation_info=eci, _nowrapper=True)
@@ -1129,13 +1170,15 @@ def setup_init_functions(eci, prefix):
     def init_types(space):
         from pypy.module.cpyext.typeobject import py_type_ready
         from pypy.module.sys.interp_encoding import getfilesystemencoding
-        py_type_ready(space, get_buffer_type())
-        py_type_ready(space, get_cobject_type())
         py_type_ready(space, get_capsule_type())
         s = space.text_w(getfilesystemencoding(space))
         setdefenc(rffi.str2charp(s, track_allocation=False))  # "leaks"
 
     from pypy.module.posix.interp_posix import add_fork_hook
+    global py_fatalerror
+    py_fatalerror = rffi.llexternal('%s_FatalError' % prefix,
+                                    [CONST_STRING], lltype.Void,
+                                    compilation_info=eci)
     _reinit_tls = rffi.llexternal('%sThread_ReInitTLS' % prefix, [],
                                   lltype.Void, compilation_info=eci)
     def reinit_tls(space):
@@ -1158,11 +1201,6 @@ def attach_c_functions(space, eci, prefix):
     state.C.PyType_GenericAlloc = rffi.llexternal(
         mangle_name(prefix, 'PyType_GenericAlloc'),
         [PyTypeObjectPtr, Py_ssize_t], PyObject,
-        compilation_info=eci,
-        _nowrapper=True)
-    state.C.PyInt_FromLong = rffi.llexternal(
-        mangle_name(prefix, 'PyInt_FromLong'),
-        [rffi.LONG], PyObject,
         compilation_info=eci,
         _nowrapper=True)
     state.C._PyPy_int_dealloc = rffi.llexternal(
@@ -1191,7 +1229,8 @@ def attach_c_functions(space, eci, prefix):
         '_PyPy_get_PyOS_InputHook', [], FUNCPTR,
         compilation_info=eci, _nowrapper=True)
     state.C.tuple_new = rffi.llexternal(
-        '_PyPy_tuple_new', [PyTypeObjectPtr, PyObject, PyObject], PyObject,
+        mangle_name(prefix, '_Py_tuple_new'),
+        [PyTypeObjectPtr, PyObject, PyObject], PyObject,
         compilation_info=eci, _nowrapper=True)
     if we_are_translated():
         eci_flags = eci
@@ -1223,7 +1262,7 @@ def attach_c_functions(space, eci, prefix):
         _, setter = rffi.CExternVariable(rffi.INT_real, c_name, eci_flags,
                                          _nowrapper=True, c_type='int')
         state.C.flag_setters[attr] = setter
-        
+
 
 def init_function(func):
     INIT_FUNCTIONS.append(func)
@@ -1322,7 +1361,7 @@ def build_bridge(space):
             ptr = ctypes.c_void_p.in_dll(bridge, mname)
             ptr.value = ctypes.cast(ll2ctypes.lltype2ctypes(value),
                                     ctypes.c_void_p).value
-        else:
+        elif typ in ('PyObject*', 'PyTypeObject*'):
             if name.startswith('PyExc_'):
                 # we already have the pointer
                 in_dll = ll2ctypes.get_ctypes_type(PyObject).in_dll(bridge, mname)
@@ -1435,23 +1474,42 @@ def mangle_name(prefix, name):
     else:
         raise ValueError("Error converting '%s'" % name)
 
-def write_header(header_name, decls):
-    lines = [
-        '#include "cpyext_object.h"',
-        '''
-#ifdef _WIN64
-#define Signed   Py_ssize_t          /* xxx temporary fix */
-#define Unsigned unsigned long long  /* xxx temporary fix */
-#else
-#define Signed   Py_ssize_t     /* xxx temporary fix */
-#define Unsigned unsigned long  /* xxx temporary fix */
-#endif
-        '''] + decls + [
-        '',
-        '#undef Signed    /* xxx temporary fix */',
-        '#undef Unsigned  /* xxx temporary fix */',
-        '']
+def write_header(header_name, decls, needs_signed=True, add_guards=False):
     decl_h = udir.join(header_name)
+    lines = []
+    if add_guards:
+        guard = 'Py_' + header_name.replace('.', '_').upper()
+        lines += ['#ifndef ' + guard,
+                  '#define ' + guard,
+                  '#ifdef __cplusplus',
+                  'extern "C" {',
+                  '#endif', ''
+                 ]
+    if needs_signed:
+        lines += [
+            '',
+            '#include "cpyext_object.h"',
+            '',
+            '#ifdef _WIN64',
+            '#define Signed   Py_ssize_t          /* xxx temporary fix */',
+            '#define Unsigned unsigned long long  /* xxx temporary fix */',
+            '#else',
+            '#define Signed   Py_ssize_t     /* xxx temporary fix */',
+            '#define Unsigned unsigned long  /* xxx temporary fix */',
+            '#endif',
+            ] + decls + [
+            '',
+            '#undef Signed    /* xxx temporary fix */',
+            '#undef Unsigned  /* xxx temporary fix */',
+            '']
+    else:
+        lines += decls
+    if add_guards:
+        lines += ['#ifdef __cplusplus',
+                  '}',
+                  '#endif',
+                  '#endif /* !' + guard + ' */',
+                 ]
     decl_h.write('\n'.join(lines))
 
 def generate_decls_and_callbacks(db, prefix=''):
@@ -1486,13 +1544,13 @@ def generate_decls_and_callbacks(db, prefix=''):
     decls[pypy_decl].append("""
 /* hack for https://bugs.python.org/issue29943 */
 
-PyAPI_FUNC(int) %s(PySliceObject *arg0,
+PyAPI_FUNC(int) %s(PyObject *arg0,
                     Signed arg1, Signed *arg2,
                     Signed *arg3, Signed *arg4, Signed *arg5);
 #ifdef __GNUC__
 __attribute__((__unused__))
 #endif
-static int PySlice_GetIndicesEx(PySliceObject *arg0, Py_ssize_t arg1,
+static int PySlice_GetIndicesEx(PyObject *arg0, Py_ssize_t arg1,
         Py_ssize_t *arg2, Py_ssize_t *arg3, Py_ssize_t *arg4,
         Py_ssize_t *arg5) {
     return %s(arg0, arg1, arg2, arg3,
@@ -1517,31 +1575,47 @@ static int PySlice_GetIndicesEx(PySliceObject *arg0, Py_ssize_t arg1,
         decls[header].append('PyAPI_DATA(%s) %s;' % (typ, name))
 
     for header_name, header_decls in decls.iteritems():
-        write_header(header_name, header_decls)
+        # Hardcoded :(
+        if header_name in ('genericaliasobject.h',):
+            write_header(header_name, header_decls,
+                         needs_signed=False, add_guards=True)
+        else:
+            write_header(header_name, header_decls)
+
+    # generate graminit.h
+    graminit_h = udir.join('graminit.h')
+    graminit_h.write('/* Generated from pypy.interpreter.pyparser.pygram.syms */')
+    for attr in dir(pygram.syms):
+        val = getattr(pygram.syms, attr)
+        graminit_h.write('#define {} {}'.format(attr, val))
+
 
 separate_module_files = [source_dir / "varargwrapper.c",
                          source_dir / "pyerrors.c",
                          source_dir / "modsupport.c",
                          source_dir / "getargs.c",
                          source_dir / "abstract.c",
-                         source_dir / "stringobject.c",
                          source_dir / "unicodeobject.c",
                          source_dir / "mysnprintf.c",
                          source_dir / "pythonrun.c",
                          source_dir / "sysmodule.c",
-                         source_dir / "bufferobject.c",
                          source_dir / "complexobject.c",
-                         source_dir / "cobject.c",
                          source_dir / "structseq.c",
                          source_dir / "capsule.c",
                          source_dir / "pysignals.c",
                          source_dir / "pythread.c",
                          source_dir / "missing.c",
                          source_dir / "pymem.c",
+                         source_dir / "pytime.c",
+                         source_dir / "bytesobject.c",
+                         source_dir / "import.c",
+                         source_dir / "_warnings.c",
+                         source_dir / "pylifecycle.c",
                          source_dir / "object.c",
                          source_dir / "typeobject.c",
-                         source_dir / "intobject.c",
                          source_dir / "tupleobject.c",
+                         source_dir / "sliceobject.c",
+                         source_dir / "call.c",
                          ]
 if WIN32:
     separate_module_files.append(source_dir / "pythread_nt.c")
@@ -1617,6 +1691,9 @@ def build_eci(code, use_micronumpy=False, translating=False):
     return eci
 
 def setup_micronumpy(space):
+    # py3k
+    return False
+
     use_micronumpy = space.config.objspace.usemodules.micronumpy
     if not use_micronumpy:
         return use_micronumpy
@@ -1654,7 +1731,7 @@ def setup_library(space):
     for name, (typ, expr) in sorted(GLOBALS.items()):
         if '#' in name:
             name, header = name.split('#')
-            assert typ in ('PyObject*', 'PyTypeObject*', 'PyIntObject*')
+            assert typ in ('PyObject*', 'PyTypeObject*')
             typ = typ[:-1]
             mname = mangle_name(prefix, name)
             include_lines.append('#define %s %s\n' % (name, mname))
@@ -1690,12 +1767,17 @@ def setup_library(space):
             deco(func.get_wrapper(space))
 
     setup_init_functions(eci, prefix)
-    trunk_include = pypydir.dirpath() / 'include'
+    if sys.platform == "win32":
+        trunk_include = pypydir.dirpath() / 'include'
+    else:
+        from pypy.module.sys import version
+        ver = version.CPYTHON_VERSION[:2]
+        trunk_include = pypydir.dirpath() / 'include' / 'pypy{}.{}'.format(*ver)
+        trunk_include.ensure(dir=True)
     copy_header_files(cts, trunk_include, use_micronumpy)
 
 
-@unwrap_spec(path='text', name='text')
-def load_extension_module(space, path, name):
+def create_extension_module(space, w_spec):
     # note: this is used both to load CPython-API-style C extension
     # modules (cpyext) and to load CFFI-style extension modules
     # (_cffi_backend).  Any of the two can be disabled at translation
@@ -1703,26 +1785,35 @@ def load_extension_module(space, path, name):
     # order of things here.
     from rpython.rlib import rdynload
 
+    w_name = space.getattr(w_spec, space.newtext("name"))
+    w_path = space.getattr(w_spec, space.newtext("origin"))
+    name = space.text_w(w_name)
+    path = space.text_w(w_path)
+
     if os.sep not in path:
         path = os.curdir + os.sep + path      # force a '/' in the path
-    basename = name.split('.')[-1]
     try:
+        # XXX does this need a fsdecoder for utf8 paths?
         ll_libname = rffi.str2charp(path)
         try:
             if WIN32:
-                # Allow other DLLs in the same directory with "path"
-                dll = rdynload.dlopenex(ll_libname)
+                from rpython.rlib import rwin32
+                # Allow other DLLs in the same directory
+                # use os.add_dll_directory for more locations
+                flags = (rwin32.LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
+                        rwin32.LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR)
+                dll = rdynload.dlopenex(ll_libname, flags)
             else:
                 dll = rdynload.dlopen(ll_libname, space.sys.dlopenflags)
         finally:
             lltype.free(ll_libname, flavor='raw')
     except rdynload.DLOpenError as e:
-        raise oefmt(space.w_ImportError,
-                    "unable to load extension module '%s': %s",
-                    path, e.msg)
+        raise raise_import_error(space,
+            space.newfilename(e.msg), w_name, w_path)
     look_for = None
     #
     if space.config.objspace.usemodules._cffi_backend:
+        basename = name.split('.')[-1]
         look_for = '_cffi_pypyinit_%s' % (basename,)
         try:
             initptr = rdynload.dlsym(dll, look_for)
@@ -1737,25 +1828,38 @@ def load_extension_module(space, path, name):
                 raise
     #
     if space.config.objspace.usemodules.cpyext:
-        also_look_for = 'init%s' % (basename,)
+        also_look_for = get_init_name(space, w_name)
         try:
             initptr = rdynload.dlsym(dll, also_look_for)
         except KeyError:
             pass
         else:
-            return load_cpyext_module(space, name, path, dll, initptr)
+            return create_cpyext_module(space, w_spec, name, path, dll, initptr)
         if look_for is not None:
             look_for += ' or ' + also_look_for
         else:
             look_for = also_look_for
-    #
-    raise oefmt(space.w_ImportError,
-                "function %s not found in library %s", look_for, path)
+    assert look_for is not None
+    msg = b"function %s not found in library %s" % (
+        look_for, space.utf8_w(space.newfilename(path)))
+    w_path = space.newfilename(path)
+    raise_import_error(space, space.newtext(msg), w_name, w_path)
 
-initfunctype = lltype.Ptr(lltype.FuncType([], lltype.Void))
+def get_init_name(space, w_name):
+    name = space.utf8_w(w_name)
+    basename = name.split('.')[-1]
+    if rutf8.first_non_ascii_char(basename) == -1:
+        return 'PyInit_%s' % (basename,)
+    basename = space.bytes_w(encode_object(
+        space, space.newtext(basename), 'punycode', None))
+    basename = basename.replace('-', '_')
+    return 'PyInitU_%s' % (basename,)
 
-def load_cpyext_module(space, name, path, dll, initptr):
+initfunctype = lltype.Ptr(lltype.FuncType([], PyObject))
+
+def create_cpyext_module(space, w_spec, name, path, dll, initptr):
     from rpython.rlib import rdynload
+    from pypy.module.cpyext.pyobject import get_w_obj_and_decref
 
     state = space.fromcache(State)
     state.make_sure_cpyext_is_imported()
@@ -1767,12 +1871,51 @@ def load_cpyext_module(space, name, path, dll, initptr):
     state.package_context = name, path
     try:
         initfunc = rffi.cast(initfunctype, initptr)
-        generic_cpy_call(space, initfunc)
-        state.check_and_raise_exception()
+        initret = generic_cpy_call_dont_convert_result(space, initfunc)
+        if not initret:
+            state.check_and_raise_exception()
+            raise oefmt(space.w_SystemError,
+                "initialization of %s failed without raising an exception",
+                name)
+        else:
+            if state.clear_exception():
+                raise oefmt(space.w_SystemError,
+                    "initialization of %s raised unreported exception",
+                    name)
+        if not initret.c_ob_type:
+            raise oefmt(space.w_SystemError,
+                        "init function of %s returned uninitialized object",
+                        name)
+        # This should probably compare by identity with PyModuleDef_Type from
+        # modsupport.c, but I didn't find a way to do that.
+        tp_name_nonconst = rffi.cast(rffi.CCHARP, initret.c_ob_type.c_tp_name)
+        if rffi.charp2str(tp_name_nonconst) == "moduledef":
+            from pypy.module.cpyext.modsupport import \
+                    create_module_from_def_and_spec
+            return create_module_from_def_and_spec(space, initret, w_spec,
+                                                   name)
     finally:
         state.package_context = old_context
-    w_mod = state.fixup_extension(name, path)
+    # XXX: should disable single-step init for non-ascii module names
+    w_mod = get_w_obj_and_decref(space, initret)
+    state.fixup_extension(w_mod, name, path)
     return w_mod
+
+@jit.dont_look_inside
+def exec_extension_module(space, w_mod):
+    from pypy.module.cpyext.modsupport import exec_def, PyModuleObject
+    if not space.config.objspace.usemodules.cpyext:
+        return
+    if not isinstance(w_mod, Module):
+        return
+    space.getbuiltinmodule("cpyext")
+    mod = cts.cast('PyModuleObject*', rawrefcount.from_obj(PyObject, w_mod))
+    if mod:
+        if mod.c_md_state:
+            # already initialised
+            return
+        moddef = mod.c_md_def
+        return exec_def(space, mod, moddef)
 
 def invoke_pyos_inputhook(space):
     state = space.fromcache(State)
@@ -1783,15 +1926,20 @@ def invoke_pyos_inputhook(space):
 @specialize.ll()
 def generic_cpy_call(space, func, *args):
     FT = lltype.typeOf(func).TO
-    return make_generic_cpy_call(FT, False)(space, func, *args)
+    return make_generic_cpy_call(FT, False, True)(space, func, *args)
 
 @specialize.ll()
 def generic_cpy_call_expect_null(space, func, *args):
     FT = lltype.typeOf(func).TO
-    return make_generic_cpy_call(FT, True)(space, func, *args)
+    return make_generic_cpy_call(FT, True, True)(space, func, *args)
+
+@specialize.ll()
+def generic_cpy_call_dont_convert_result(space, func, *args):
+    FT = lltype.typeOf(func).TO
+    return make_generic_cpy_call(FT, False, False)(space, func, *args)
 
 @specialize.memo()
-def make_generic_cpy_call(FT, expect_null):
+def make_generic_cpy_call(FT, expect_null, convert_result):
     from pypy.module.cpyext.pyobject import is_pyobj, make_ref, decref
     from pypy.module.cpyext.pyobject import get_w_obj_and_decref
     from pypy.module.cpyext.pyerrors import PyErr_Occurred
@@ -1846,7 +1994,7 @@ def make_generic_cpy_call(FT, expect_null):
                 if _pyobj is not None:
                     decref(space, _pyobj)
 
-        if is_PyObject(RESULT_TYPE):
+        if convert_result and is_PyObject(RESULT_TYPE):
             if not is_pyobj(result):
                 ret = result
             else:

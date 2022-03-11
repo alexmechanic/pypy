@@ -2,25 +2,29 @@ import __builtin__
 from pypy.interpreter import special
 from pypy.interpreter.baseobjspace import ObjSpace, W_Root
 from pypy.interpreter.error import OperationError, oefmt
+from pypy.interpreter.function import Function, Method, FunctionWithFixedCode
 from pypy.interpreter.typedef import get_unique_interplevel_subclass
+from pypy.interpreter.unicodehelper import decode_utf8sp
 from pypy.objspace.std import frame, transparent, callmethod
-from pypy.objspace.descroperation import DescrOperation, raiseattrerror
+from pypy.objspace.descroperation import (
+    DescrOperation, get_attribute_name, raiseattrerror)
 from rpython.rlib.objectmodel import instantiate, specialize, is_annotation_constant
 from rpython.rlib.debug import make_sure_not_resized
 from rpython.rlib.rarithmetic import base_int, widen, is_valid_int
-from rpython.rlib.objectmodel import import_from_mixin, enforceargs, not_rpython
-from rpython.rlib import jit, rutf8
+from rpython.rlib.objectmodel import import_from_mixin, we_are_translated
+from rpython.rlib.objectmodel import not_rpython
+from rpython.rlib import jit, rutf8, types
+from rpython.rlib.signature import signature, finishsigs
 
 # Object imports
-from pypy.objspace.std.basestringtype import basestring_typedef
 from pypy.objspace.std.boolobject import W_BoolObject
-from pypy.objspace.std.bufferobject import W_Buffer
 from pypy.objspace.std.bytearrayobject import W_BytearrayObject
 from pypy.objspace.std.bytesobject import W_BytesObject
 from pypy.objspace.std.complexobject import W_ComplexObject
 from pypy.objspace.std.dictmultiobject import W_DictMultiObject, W_DictObject
 from pypy.objspace.std.floatobject import W_FloatObject
-from pypy.objspace.std.intobject import W_IntObject, setup_prebuilt, wrapint
+from pypy.objspace.std.intobject import (
+    W_AbstractIntObject, W_IntObject, setup_prebuilt, wrapint)
 from pypy.objspace.std.iterobject import W_AbstractSeqIterObject, W_SeqIterObject
 from pypy.objspace.std.iterobject import W_FastUnicodeIterObject
 from pypy.objspace.std.listobject import W_ListObject
@@ -34,7 +38,7 @@ from pypy.objspace.std.tupleobject import W_AbstractTupleObject, W_TupleObject
 from pypy.objspace.std.typeobject import W_TypeObject, TypeCache
 from pypy.objspace.std.unicodeobject import W_UnicodeObject
 
-
+@finishsigs
 class StdObjSpace(ObjSpace):
     """The standard object space, implementing a general-purpose object
     library in Restricted Python."""
@@ -64,16 +68,14 @@ class StdObjSpace(ObjSpace):
         # types
         builtin_type_classes = {
             W_BoolObject.typedef: W_BoolObject,
-            W_Buffer.typedef: W_Buffer,
             W_BytearrayObject.typedef: W_BytearrayObject,
             W_BytesObject.typedef: W_BytesObject,
             W_ComplexObject.typedef: W_ComplexObject,
             W_DictMultiObject.typedef: W_DictMultiObject,
             W_FloatObject.typedef: W_FloatObject,
-            W_IntObject.typedef: W_IntObject,
+            W_IntObject.typedef: W_AbstractIntObject,
             W_AbstractSeqIterObject.typedef: W_AbstractSeqIterObject,
             W_ListObject.typedef: W_ListObject,
-            W_LongObject.typedef: W_LongObject,
             W_MemoryView.typedef: W_MemoryView,
             W_NoneObject.typedef: W_NoneObject,
             W_ObjectObject.typedef: W_ObjectObject,
@@ -89,30 +91,27 @@ class StdObjSpace(ObjSpace):
         for typedef, cls in builtin_type_classes.items():
             w_type = self.gettypeobject(typedef)
             self.builtin_types[typedef.name] = w_type
-            name = typedef.name
-            # we don't expose 'space.w_str' at all, to avoid confusion
-            # with Python 3.  Instead, in Python 2, it becomes
-            # space.w_bytes (or space.w_text).
-            if name == 'str':
-                name = 'bytes'
-            setattr(self, 'w_' + name, w_type)
+            setattr(self, 'w_' + typedef.name, w_type)
             self._interplevel_classes[w_type] = cls
-        self.w_text = self.w_bytes   # 'space.w_text' is w_unicode on Py3
+        # The loop above sets space.w_str and space.w_bytes.
+        # We rename 'space.w_str' to 'space.w_unicode' and
+        # 'space.w_text'.
+        self.w_unicode = self.w_str
+        self.w_text = self.w_str
+        del self.w_str
+        self.w_long = self.w_int
         self.w_dict.flag_map_or_seq = 'M'
         from pypy.objspace.std import dictproxyobject
         dictproxyobject._set_flag_map_or_seq(self)
         self.w_list.flag_map_or_seq = 'S'
         self.w_tuple.flag_map_or_seq = 'S'
+        self.builtin_types['str'] = self.w_unicode
+        self.builtin_types['bytes'] = self.w_bytes
         self.builtin_types["NotImplemented"] = self.w_NotImplemented
         self.builtin_types["Ellipsis"] = self.w_Ellipsis
-        self.w_basestring = self.builtin_types['basestring'] = \
-            self.gettypeobject(basestring_typedef)
 
         # exceptions & builtins
         self.make_builtins()
-
-        # the type of old-style classes
-        self.w_classobj = self.builtin.get('__metaclass__')
 
         # final setup
         self.setup_builtin_modules()
@@ -177,6 +176,25 @@ class StdObjSpace(ObjSpace):
             return w_result
         if isinstance(x, base_int):
             return self.newint(x)
+        return self._wrap_not_rpython(x)
+
+    def _wrap_string_old(self, x):
+        # XXX should disappear soon
+        print 'WARNING: space.wrap() called on a non-ascii byte string: %s' % (
+            self.text_w(self.repr(self.newbytes(x))),)
+        lst = []
+        for ch in x:
+            ch = ord(ch)
+            if ch > 127:
+                lst.append(u'\ufffd')
+            else:
+                lst.append(unichr(ch))
+        unicode_x = u''.join(lst)
+        return self.newtext(unicode_x)
+
+    @not_rpython # only for tests
+    def _wrap_not_rpython(self, x):
+        # _____ this code is here to support testing only _____
 
         # we might get there in non-translated versions if 'x' is
         # a long that fits the correct range.
@@ -294,7 +312,10 @@ class StdObjSpace(ObjSpace):
         return W_LongObject.fromrarith_int(val)
 
     def newlong_from_rbigint(self, val):
-        return newlong(self, val)
+        try:
+            return self.newint(val.toint())
+        except OverflowError:
+            return newlong(self, val)
 
     def newtuple(self, list_w):
         from pypy.objspace.std.tupleobject import wraptuple
@@ -309,12 +330,14 @@ class StdObjSpace(ObjSpace):
     def newlist_bytes(self, list_s):
         return W_ListObject.newlist_bytes(self, list_s)
 
-    newlist_text = newlist_bytes
+    def newlist_text(self, list_t):
+        return self.newlist_utf8([decode_utf8sp(self, s)[0] for s in list_t], False)
 
     def newlist_utf8(self, list_u, is_ascii):
         if is_ascii:
             return W_ListObject.newlist_ascii(self, list_u)
         return ObjSpace.newlist_utf8(self, list_u, False)
+
 
     def newlist_int(self, list_i):
         return W_ListObject.newlist_int(self, list_i)
@@ -327,6 +350,11 @@ class StdObjSpace(ObjSpace):
         return W_DictMultiObject.allocate_and_init_instance(
                 self, module=module, instance=instance,
                 strdict=strdict, kwargs=kwargs)
+
+    def newdictproxy(self, w_dict):
+        # e.g. for module/_sre/
+        from pypy.objspace.std.dictproxyobject import W_DictProxyObject
+        return W_DictProxyObject(w_dict)
 
     def newset(self, iterable_w=None):
         if iterable_w is None:
@@ -342,52 +370,56 @@ class StdObjSpace(ObjSpace):
         return W_SliceObject(w_start, w_end, w_step)
 
     def newseqiter(self, w_obj):
-        if type(w_obj) is W_UnicodeObject:
-            return W_FastUnicodeIterObject(w_obj)
         return W_SeqIterObject(w_obj)
 
-    def newbuffer(self, obj):
-        ret = W_Buffer(obj)
-        return ret
+    def newmemoryview(self, w_obj):
+        return W_MemoryView(w_obj)
 
     def newmemoryview(self, view):
         return W_MemoryView(view)
 
     def newbytes(self, s):
-        assert isinstance(s, str)
+        assert isinstance(s, bytes)
         return W_BytesObject(s)
 
-    @specialize.arg_or_var(1)
-    def newtext(self, s):
-        assert isinstance(s, str)
-        if is_annotation_constant(s):
-            return self._newtext_memo(s)
-        return W_BytesObject(s) # Python3 this is unicode
+    def newbytearray(self, l):
+        return W_BytearrayObject(l)
 
-    def newtext_or_none(self, s):
+    @specialize.arg_or_var(1, 2)
+    def newtext(self, s, lgt=-1, unused=-1):
+        # the unused argument can be from something like
+        # newtext(*decode_utf8sp(space, code))
+        if is_annotation_constant(s) and is_annotation_constant(lgt):
+            return self._newtext_memo(s, lgt)
+        assert isinstance(s, str)
+        if lgt < 0:
+            lgt = rutf8.codepoints_in_utf8(s)
+        return W_UnicodeObject(s, lgt)
+
+    def newtext_or_none(self, s, lgt=-1):
         if s is None:
             return self.w_None
-        return self.newtext(s)
+        return self.newtext(s, lgt)
 
     @specialize.memo()
-    def _newtext_memo(self, s):
+    def _newtext_memo(self, s, lgt):
         if s is None:
             return self.w_None # can happen during annotation
         # try to see whether we exist as an interned string, but don't intern
         # if not
-        w_t = self.interned_strings.get(s)
-        if w_t is not None:
-            return w_t
-        return W_BytesObject(s)
+        w_u = self.interned_strings.get(s)
+        if w_u is not None:
+            return w_u
+        if lgt < 0:
+            lgt = rutf8.codepoints_in_utf8(s)
+        return W_UnicodeObject(s, lgt)
 
     def newutf8(self, utf8s, length):
-        assert utf8s is not None
         assert isinstance(utf8s, str)
         return W_UnicodeObject(utf8s, length)
 
     def newfilename(self, s):
-        assert isinstance(s, str) # on pypy3, this decodes the byte string
-        return W_BytesObject(s)   # with the filesystem encoding
+        return self.fsdecode(self.newbytes(s))
 
     def type(self, w_obj):
         jit.promote(w_obj.__class__)
@@ -445,8 +477,13 @@ class StdObjSpace(ObjSpace):
     # one is not
 
     def _wrap_expected_length(self, expected, got):
-        return oefmt(self.w_ValueError,
-                     "expected length %d, got %d", expected, got)
+        if got > expected:
+            raise oefmt(self.w_ValueError,
+                        "too many values to unpack (expected %d)", expected)
+        else:
+            raise oefmt(self.w_ValueError,
+                        "not enough values to unpack (expected %d, got %d)",
+                        expected, got)
 
     def unpackiterable(self, w_obj, expected_length=-1):
         if isinstance(w_obj, W_AbstractTupleObject) and self._uses_tuple_iter(w_obj):
@@ -512,8 +549,9 @@ class StdObjSpace(ObjSpace):
             return w_obj.listview_bytes()
         if type(w_obj) is W_SetObject or type(w_obj) is W_FrozensetObject:
             return w_obj.listview_bytes()
-        if isinstance(w_obj, W_BytesObject) and self._str_uses_no_iter(w_obj):
-            return w_obj.listview_bytes()
+        if isinstance(w_obj, W_BytesObject):
+            # Python3 considers bytes strings as a list of numbers.
+            return None
         if isinstance(w_obj, W_ListObject) and self._uses_list_iter(w_obj):
             return w_obj.getitems_bytes()
         return None
@@ -527,8 +565,7 @@ class StdObjSpace(ObjSpace):
             return w_obj.listview_ascii()
         if type(w_obj) is W_SetObject or type(w_obj) is W_FrozensetObject:
             return w_obj.listview_ascii()
-        if (isinstance(w_obj, W_UnicodeObject) and self._uni_uses_no_iter(w_obj)
-            and w_obj.is_ascii()):
+        if isinstance(w_obj, W_UnicodeObject) and self._uses_unicode_iter(w_obj):
             return w_obj.listview_ascii()
         if isinstance(w_obj, W_ListObject) and self._uses_list_iter(w_obj):
             return w_obj.getitems_ascii()
@@ -540,6 +577,9 @@ class StdObjSpace(ObjSpace):
         if type(w_obj) is W_DictObject:
             return w_obj.listview_int()
         if type(w_obj) is W_SetObject or type(w_obj) is W_FrozensetObject:
+            return w_obj.listview_int()
+        if type(w_obj) is W_BytesObject:
+            # Python3 considers bytes strings as a list of numbers.
             return w_obj.listview_int()
         if isinstance(w_obj, W_ListObject) and self._uses_list_iter(w_obj):
             return w_obj.getitems_int()
@@ -572,15 +612,9 @@ class StdObjSpace(ObjSpace):
         from pypy.objspace.descroperation import tuple_iter
         return self.lookup(w_obj, '__iter__') is tuple_iter(self)
 
-    def _str_uses_no_iter(self, w_obj):
-        from pypy.objspace.descroperation import bytes_getitem
-        return (self.lookup(w_obj, '__iter__') is None and
-                self.lookup(w_obj, '__getitem__') is bytes_getitem(self))
-
-    def _uni_uses_no_iter(self, w_obj):
-        from pypy.objspace.descroperation import unicode_getitem
-        return (self.lookup(w_obj, '__iter__') is None and
-                self.lookup(w_obj, '__getitem__') is unicode_getitem(self))
+    def _uses_unicode_iter(self, w_obj):
+        from pypy.objspace.descroperation import unicode_iter
+        return self.lookup(w_obj, '__iter__') is unicode_iter(self)
 
     def sliceindices(self, w_slice, w_length):
         if isinstance(w_slice, W_SliceObject):
@@ -611,7 +645,7 @@ class StdObjSpace(ObjSpace):
 
         # fast path: XXX this is duplicating most of the logic
         # from the default __getattribute__ and the getattr() method...
-        name = self.text_w(w_name)
+        name = get_attribute_name(self, w_obj, w_name)
         w_descr = w_type.lookup(name)
         e = None
         if w_descr is not None:
@@ -625,6 +659,13 @@ class StdObjSpace(ObjSpace):
                     return w_value
                 if not is_data:
                     w_get = self.lookup(w_descr, "__get__")
+            typ = type(w_descr)
+            if typ is Function or typ is FunctionWithFixedCode:
+                # This shortcut is necessary if w_obj is None.  Otherwise e.g.
+                # None.__eq__ would return an unbound function because calling
+                # __get__ with None as the first argument returns the attribute
+                # as if it was accessed through the owner (type(None).__eq__).
+                return Method(self, w_descr, w_obj)
             if w_get is not None:
                 # __get__ is allowed to raise an AttributeError to trigger
                 # use of __getattr__.
@@ -647,7 +688,7 @@ class StdObjSpace(ObjSpace):
         elif e is not None:
             raise e
         else:
-            raiseattrerror(self, w_obj, name)
+            raiseattrerror(self, w_obj, w_name)
 
     def finditem_str(self, w_obj, key):
         """ Perform a getitem on w_obj with key (string). Returns found
@@ -681,10 +722,10 @@ class StdObjSpace(ObjSpace):
         else:
             self.setitem(w_obj, self.newtext(key), w_value)
 
-    def getindex_w(self, w_obj, w_exception, objdescr=None, errmsg=None):
+    def getindex_w(self, w_obj, w_exception, objdescr=None):
         if type(w_obj) is W_IntObject:
             return w_obj.intval
-        return ObjSpace.getindex_w(self, w_obj, w_exception, objdescr, errmsg)
+        return ObjSpace.getindex_w(self, w_obj, w_exception, objdescr)
 
     def unicode_from_object(self, w_obj):
         from pypy.objspace.std.unicodeobject import unicode_from_object
@@ -724,3 +765,20 @@ class StdObjSpace(ObjSpace):
     def is_overloaded(self, w_obj, tp, method):
         return (self.lookup(w_obj, method) is not
                 self.lookup_in_type(tp, method))
+
+    def getfulltypename(self, w_obj):
+        w_type = self.type(w_obj)
+        if w_type.is_heaptype():
+            classname = w_type.getqualname(self)
+            w_module = w_type.lookup("__module__")
+            if w_module is not None:
+                try:
+                    modulename = self.utf8_w(w_module)
+                except OperationError as e:
+                    if not e.match(self, self.w_TypeError):
+                        raise
+                else:
+                    classname = '%s.%s' % (modulename, classname)
+        else:
+            classname = w_type.name
+        return classname

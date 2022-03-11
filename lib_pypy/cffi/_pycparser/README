@@ -1,6 +1,8 @@
 This is a copy of pycparser.  See __init__.py for the version.
 
-Note that the following two lines have been modified in c_parser.py:
+Note:
+
+- the following two lines have been modified in c_parser.py:
 
 
 class CParser(PLYParser):    

@@ -20,8 +20,8 @@ class AppTestCMath:
         import math
         z = eval("-0j")
         assert z == -0j
-        assert math.copysign(1., z.real) == 1.
-        assert math.copysign(1., z.imag) == -1.
+        assert math.copysign(1., z.real) == -1.0
+        assert math.copysign(1., z.imag) == -1.0
 
     def test_sqrt(self):
         import cmath, math
@@ -89,6 +89,18 @@ class AppTestCMath:
         assert cmath.isnan(complex("inf+nanj"))
         assert cmath.isnan(complex("nan+infj"))
 
+    def test_isfinite(self):
+        import cmath
+        import math
+
+        real_vals = [
+            float('-inf'), -2.3, -0.0, 0.0, 2.3, float('inf'), float('nan')
+        ]
+        for x in real_vals:
+            for y in real_vals:
+                z = complex(x, y)
+                assert cmath.isfinite(z) == (math.isfinite(x) and math.isfinite(y))
+
     def test_user_defined_complex(self):
         import cmath
         class Foo(object):
@@ -104,6 +116,40 @@ class AppTestCMath:
             def __float__(self):
                 return 2.0
         assert cmath.polar(Foo()) == (2, 0)
+
+    def test_isclose(self):
+        import cmath
+        raises(ValueError, cmath.isclose, 2, 3, rel_tol=-0.5)
+        raises(ValueError, cmath.isclose, 2, 3, abs_tol=-0.5)
+        for z in [0.0, 1.0, 1j,
+                  complex("inf"), complex("infj"),
+                  complex("-inf"), complex("-infj")]:
+            assert cmath.isclose(z, z)
+        assert not cmath.isclose(complex("infj"), complex("-infj"))
+        assert cmath.isclose(1j, 1j+1e-12)
+        assert not cmath.isclose(1j, 1j+1e-12, rel_tol=1e-13)
+        assert not cmath.isclose(100000j, 100001j)
+        assert cmath.isclose(100000j, 100001j, rel_tol=1e-4)
+        assert cmath.isclose(100000j, 100001j, abs_tol=1.5)
+        assert not cmath.isclose(100000j, 100001j, abs_tol=0.5)
+
+    def test_infinity_and_nan_constants(self):
+        import cmath, math
+        assert cmath.inf.real == math.inf
+        assert cmath.inf.imag == 0.0
+        assert cmath.infj.real == 0.0
+        assert cmath.infj.imag == math.inf
+
+        assert math.isnan(cmath.nan.real)
+        assert cmath.nan.imag == 0.0
+        assert cmath.nanj.real == 0.0
+        assert math.isnan(cmath.nanj.imag)
+
+        # Check consistency with reprs.
+        assert repr(cmath.inf) == "inf"
+        assert repr(cmath.infj) == "infj"
+        assert repr(cmath.nan) == "nan"
+        assert repr(cmath.nanj) == "nanj"
 
 
 def parse_testfile(fname):
@@ -181,7 +227,7 @@ def rAssertAlmostEqual(a, b, rel_err = 2e-15, abs_err = 5e-323, msg=''):
 def test_specific_values():
     #if not float.__getformat__("double").startswith("IEEE"):
     #    return
-    
+
     import rpython
     # too fragile...
     fname = os.path.join(os.path.dirname(rpython.rlib.__file__), 'test', 'rcomplex_testcases.txt')

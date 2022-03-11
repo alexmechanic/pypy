@@ -2,10 +2,19 @@
 Arguments objects.
 """
 from rpython.rlib.debug import make_sure_not_resized
-from rpython.rlib.objectmodel import not_rpython
+from rpython.rlib.objectmodel import not_rpython, specialize
 from rpython.rlib import jit
+from rpython.rlib.objectmodel import enforceargs
+from rpython.rlib.rstring import StringBuilder
 
 from pypy.interpreter.error import OperationError, oefmt
+
+@specialize.arg(2)
+def raise_type_error(space, fnname_parens, msg, *args):
+    if fnname_parens is None:
+        raise oefmt(space.w_TypeError, msg, *args)
+    msg = "%s " + msg
+    raise oefmt(space.w_TypeError, msg, fnname_parens, *args)
 
 
 class Arguments(object):
@@ -19,11 +28,9 @@ class Arguments(object):
     semantics are complex, but calls occur everywhere.
     """
 
-    ###  Construction  ###
-
     def __init__(self, space, args_w, keywords=None, keywords_w=None,
                  w_stararg=None, w_starstararg=None, keyword_names_w=None,
-                 methodcall=False):
+                 methodcall=False, fnname_parens=None):
         self.space = space
         assert isinstance(args_w, list)
         self.arguments_w = args_w
@@ -39,7 +46,7 @@ class Arguments(object):
             make_sure_not_resized(self.keywords_w)
 
         make_sure_not_resized(self.arguments_w)
-        self._combine_wrapped(w_stararg, w_starstararg)
+        self._combine_wrapped(w_stararg, w_starstararg, fnname_parens)
         # a flag that specifies whether the JIT can unroll loops that operate
         # on the keywords
         self._jit_few_keywords = self.keywords is None or jit.isconstant(len(self.keywords))
@@ -77,28 +84,28 @@ class Arguments(object):
         "Return a new Arguments with a new argument inserted first."
         return self.replace_arguments([w_firstarg] + self.arguments_w)
 
-    def _combine_wrapped(self, w_stararg, w_starstararg):
+    def _combine_wrapped(self, w_stararg, w_starstararg, fnname_parens=None):
         "unpack the *arg and **kwd into arguments_w and keywords_w"
         if w_stararg is not None:
-            self._combine_starargs_wrapped(w_stararg)
+            self._combine_starargs_wrapped(w_stararg, fnname_parens)
         if w_starstararg is not None:
-            self._combine_starstarargs_wrapped(w_starstararg)
+            self._combine_starstarargs_wrapped(w_starstararg, fnname_parens)
 
-    def _combine_starargs_wrapped(self, w_stararg):
+    def _combine_starargs_wrapped(self, w_stararg, fnname_parens=None):
         # unpack the * arguments
         space = self.space
         try:
             args_w = space.fixedview(w_stararg)
         except OperationError as e:
             if (e.match(space, space.w_TypeError) and
-                    not space.is_generator(w_stararg)):
-                raise oefmt(space.w_TypeError,
+                    not space.is_iterable(w_stararg)):
+                raise_type_error(space, fnname_parens,
                             "argument after * must be an iterable, not %T",
                             w_stararg)
             raise
         self.arguments_w = self.arguments_w + args_w
 
-    def _combine_starstarargs_wrapped(self, w_starstararg):
+    def _combine_starstarargs_wrapped(self, w_starstararg, fnname_parens=None):
         # unpack the ** arguments
         space = self.space
         keywords, values_w = space.view_as_kwargs(w_starstararg)
@@ -108,7 +115,8 @@ class Arguments(object):
                 self.keywords_w = values_w
             else:
                 _check_not_duplicate_kwargs(
-                    self.space, self.keywords, keywords, values_w)
+                    self.space, self.keywords, keywords, values_w,
+                    fnname_parens)
                 self.keywords = self.keywords + keywords
                 self.keywords_w = self.keywords_w + values_w
             return
@@ -121,7 +129,7 @@ class Arguments(object):
                 w_keys = space.call_method(w_starstararg, "keys")
             except OperationError as e:
                 if e.match(space, space.w_AttributeError):
-                    raise oefmt(space.w_TypeError,
+                    raise_type_error(space, fnname_parens,
                                 "argument after ** must be a mapping, not %T",
                                 w_starstararg)
                 raise
@@ -130,7 +138,7 @@ class Arguments(object):
         keywords = [None] * len(keys_w)
         _do_combine_starstarargs_wrapped(
             space, keys_w, w_starstararg, keywords, keywords_w, self.keywords,
-            is_dict)
+            is_dict, fnname_parens)
         self.keyword_names_w = keys_w
         if self.keywords is None:
             self.keywords = keywords
@@ -161,7 +169,7 @@ class Arguments(object):
 
     @jit.unroll_safe
     def _match_signature(self, w_firstarg, scope_w, signature, defaults_w=None,
-                         blindargs=0):
+                         w_kw_defs=None, blindargs=0):
         """Parse args and kwargs according to the signature of a code object,
         or raise an ArgErr in case of failure.
         """
@@ -173,17 +181,23 @@ class Arguments(object):
         # some comments about the JIT: it assumes that signature is a constant,
         # so all values coming from there can be assumed constant. It assumes
         # that the length of the defaults_w does not vary too much.
+        co_posonlyargcount = signature.posonlyargcount
         co_argcount = signature.num_argnames() # expected formal arguments, without */**
+        co_kwonlyargcount = signature.num_kwonlyargnames()
+        too_many_args = False
 
         # put the special w_firstarg into the scope, if it exists
+        upfront = 0
+        args_w = self.arguments_w
         if w_firstarg is not None:
-            upfront = 1
             if co_argcount > 0:
                 scope_w[0] = w_firstarg
-        else:
-            upfront = 0
+                upfront = 1
+            else:
+                # ugh, this is a call to a method 'def meth(*args)', maybe
+                # (see test_issue2996_*).  Fall-back solution...
+                args_w = [w_firstarg] + args_w
 
-        args_w = self.arguments_w
         num_args = len(args_w)
         avail = num_args + upfront
 
@@ -191,7 +205,6 @@ class Arguments(object):
         num_kwds = 0
         if keywords is not None:
             num_kwds = len(keywords)
-
 
         # put as many positional input arguments into place as available
         input_argcount = upfront
@@ -207,23 +220,21 @@ class Arguments(object):
         # collect extra positional arguments into the *vararg
         if signature.has_vararg():
             args_left = co_argcount - upfront
-            if args_left < 0:  # check required by rpython
-                starargs_w = [w_firstarg]
-                if num_args:
-                    starargs_w = starargs_w + args_w
-            elif num_args > args_left:
+            assert args_left >= 0  # check required by rpython
+            if num_args > args_left:
                 starargs_w = args_w[args_left:]
             else:
                 starargs_w = []
-            scope_w[co_argcount] = self.space.newtuple(starargs_w)
+            loc = co_argcount + co_kwonlyargcount
+            scope_w[loc] = self.space.newtuple(starargs_w)
         elif avail > co_argcount:
-            raise self.argerrcount(avail, num_kwds, signature, defaults_w, 0)
+            too_many_args = True
 
         # if a **kwargs argument is needed, create the dict
         w_kwds = None
         if signature.has_kwarg():
             w_kwds = self.space.newdict(kwargs=True)
-            scope_w[co_argcount + signature.has_vararg()] = w_kwds
+            scope_w[co_argcount + co_kwonlyargcount + signature.has_vararg()] = w_kwds
 
         # handle keyword arguments
         num_remainingkwds = 0
@@ -232,7 +243,7 @@ class Arguments(object):
         if num_kwds:
             # kwds_mapping maps target indexes in the scope (minus input_argcount)
             # to positions in the keywords_w list
-            kwds_mapping = [0] * (co_argcount - input_argcount)
+            kwds_mapping = [0] * (co_argcount + co_kwonlyargcount - input_argcount)
             # initialize manually, for the JIT :-(
             for i in range(len(kwds_mapping)):
                 kwds_mapping[i] = -1
@@ -241,8 +252,8 @@ class Arguments(object):
             # this function must not take a scope_w, to make the scope not
             # escape
             num_remainingkwds = _match_keywords(
-                    signature, blindargs, input_argcount, keywords,
-                    kwds_mapping, self._jit_few_keywords)
+                    signature, blindargs, co_posonlyargcount, input_argcount,
+                    keywords, kwds_mapping, self._jit_few_keywords)
             if num_remainingkwds:
                 if w_kwds is not None:
                     # collect extra keyword arguments into the **kwarg
@@ -250,40 +261,74 @@ class Arguments(object):
                             self.space, keywords, keywords_w, w_kwds,
                             kwds_mapping, self.keyword_names_w, self._jit_few_keywords)
                 else:
-                    if co_argcount == 0:
-                        raise self.argerrcount(avail, num_kwds, signature, defaults_w, 0)
                     raise ArgErrUnknownKwds(self.space, num_remainingkwds, keywords,
                                             kwds_mapping, self.keyword_names_w)
 
         # check for missing arguments and fill them from the kwds,
         # or with defaults, if available
-        missing = 0
-        if input_argcount < co_argcount:
+        missing_positional = []
+        missing_kwonly = []
+        more_filling = (input_argcount < co_argcount + co_kwonlyargcount)
+        def_first = 0
+        if more_filling:
             def_first = co_argcount - (0 if defaults_w is None else len(defaults_w))
             j = 0
             kwds_index = -1
-            for i in range(input_argcount, co_argcount):
+            # first, fill the arguments from the kwds
+            for i in range(input_argcount, co_argcount + co_kwonlyargcount):
                 if kwds_mapping is not None:
                     kwds_index = kwds_mapping[j]
                     j += 1
                     if kwds_index >= 0:
                         scope_w[i] = keywords_w[kwds_index]
-                        continue
+
+        if too_many_args:
+            kwonly_given = 0
+            for i in range(co_argcount, co_argcount + co_kwonlyargcount):
+                if scope_w[i] is not None:
+                    kwonly_given += 1
+            if self.methodcall:
+                cls = ArgErrTooManyMethod
+            else:
+                cls = ArgErrTooMany
+            raise cls(signature,
+                                0 if defaults_w is None else len(defaults_w),
+                                avail, kwonly_given)
+
+        if more_filling:
+            # then, fill the posonly arguments with defaults_w (if needed)
+            for i in range(input_argcount, co_argcount):
+                if scope_w[i] is not None:
+                    continue
                 defnum = i - def_first
                 if defnum >= 0:
                     scope_w[i] = defaults_w[defnum]
                 else:
-                    missing += 1
-            if missing:
-                raise self.argerrcount(avail, num_kwds, signature, defaults_w, missing)
+                    missing_positional.append(signature.argnames[i])
 
-    def argerrcount(self, *args):
-        if self.methodcall:
-            return ArgErrCountMethod(*args)
-        return ArgErrCount(*args)
+            # finally, fill kwonly arguments with w_kw_defs (if needed)
+            for i in range(co_argcount, co_argcount + co_kwonlyargcount):
+                if scope_w[i] is not None:
+                    continue
+                name = signature.kwonlyargnames[i - co_argcount]
+                if w_kw_defs is None:
+                    missing_kwonly.append(name)
+                    continue
+                w_def = self.space.finditem_str(w_kw_defs, name)
+                if w_def is not None:
+                    scope_w[i] = w_def
+                else:
+                    missing_kwonly.append(name)
+
+        if missing_positional:
+            raise ArgErrMissing(missing_positional, True)
+        if missing_kwonly:
+            raise ArgErrMissing(missing_kwonly, False)
+
 
     def parse_into_scope(self, w_firstarg,
-                         scope_w, fnname, signature, defaults_w=None):
+                         scope_w, fnname, signature, defaults_w=None,
+                         w_kw_defs=None):
         """Parse args and kwargs to initialize a frame
         according to the signature of code object.
         Store the argumentvalues into scope_w.
@@ -291,31 +336,34 @@ class Arguments(object):
         """
         try:
             self._match_signature(w_firstarg,
-                                  scope_w, signature, defaults_w, 0)
+                                  scope_w, signature, defaults_w,
+                                  w_kw_defs, 0)
         except ArgErr as e:
-            raise oefmt(self.space.w_TypeError, "%s() %s", fnname, e.getmsg())
+            raise oefmt(self.space.w_TypeError, "%s() %8", fnname, e.getmsg())
         return signature.scope_length()
 
-    def _parse(self, w_firstarg, signature, defaults_w, blindargs=0):
+    def _parse(self, w_firstarg, signature, defaults_w, w_kw_defs, blindargs=0):
         """Parse args and kwargs according to the signature of a code object,
         or raise an ArgErr in case of failure.
         """
         scopelen = signature.scope_length()
         scope_w = [None] * scopelen
         self._match_signature(w_firstarg, scope_w, signature, defaults_w,
-                              blindargs)
+                              w_kw_defs, blindargs)
         return scope_w
 
 
     def parse_obj(self, w_firstarg,
-                  fnname, signature, defaults_w=None, blindargs=0):
-        """Parse args and kwargs to initialize a frame
-        according to the signature of code object.
+                  fnname, signature, defaults_w=None, w_kw_defs=None,
+                  blindargs=0):
+        """Parse args and kwargs into a list according to the signature of a
+        code object.
         """
         try:
-            return self._parse(w_firstarg, signature, defaults_w, blindargs)
+            return self._parse(w_firstarg, signature, defaults_w, w_kw_defs,
+                               blindargs)
         except ArgErr as e:
-            raise oefmt(self.space.w_TypeError, "%s() %s", fnname, e.getmsg())
+            raise oefmt(self.space.w_TypeError, "%s() %8", fnname, e.getmsg())
 
     @staticmethod
     def frompacked(space, w_args=None, w_kwds=None):
@@ -346,28 +394,30 @@ class Arguments(object):
 # look at. They should not get a self arguments, which makes the amount of
 # arguments annoying :-(
 
-@jit.look_inside_iff(lambda space, existingkeywords, keywords, keywords_w:
+@jit.look_inside_iff(lambda space, existingkeywords, keywords, keywords_w, fnname_parens:
         jit.isconstant(len(keywords) and
         jit.isconstant(existingkeywords)))
-def _check_not_duplicate_kwargs(space, existingkeywords, keywords, keywords_w):
+def _check_not_duplicate_kwargs(space, existingkeywords, keywords, keywords_w, fnname_parens):
     # looks quadratic, but the JIT should remove all of it nicely.
     # Also, all the lists should be small
     for key in keywords:
         for otherkey in existingkeywords:
             if otherkey == key:
-                raise oefmt(space.w_TypeError,
+                raise_type_error(space, fnname_parens,
                             "got multiple values for keyword argument '%s'",
                             key)
 
 def _do_combine_starstarargs_wrapped(space, keys_w, w_starstararg, keywords,
-        keywords_w, existingkeywords, is_dict):
+        keywords_w, existingkeywords, is_dict, fnname_parens):
     i = 0
     for w_key in keys_w:
         try:
             key = space.text_w(w_key)
         except OperationError as e:
             if e.match(space, space.w_TypeError):
-                raise oefmt(space.w_TypeError, "keywords must be strings")
+                raise_type_error(space, fnname_parens,
+                            "keywords must be strings, not '%T'",
+                            w_key)
             if e.match(space, space.w_UnicodeEncodeError):
                 # Allow this to pass through
                 key = None
@@ -375,7 +425,7 @@ def _do_combine_starstarargs_wrapped(space, keys_w, w_starstararg, keywords,
                 raise
         else:
             if existingkeywords and key in existingkeywords:
-                raise oefmt(space.w_TypeError,
+                raise_type_error(space, fnname_parens,
                             "got multiple values for keyword argument '%s'",
                             key)
         keywords[i] = key
@@ -392,13 +442,14 @@ def _do_combine_starstarargs_wrapped(space, keys_w, w_starstararg, keywords,
         i += 1
 
 @jit.look_inside_iff(
-    lambda signature, blindargs, input_argcount,
+    lambda signature, blindargs, co_posonlyargcount, input_argcount,
            keywords, kwds_mapping, jiton: jiton)
-def _match_keywords(signature, blindargs, input_argcount,
-                    keywords, kwds_mapping, _):
+def _match_keywords(signature, blindargs, co_posonlyargcount,
+                    input_argcount, keywords, kwds_mapping, _):
     # letting JIT unroll the loop is *only* safe if the callsite didn't
     # use **args because num_kwds can be arbitrarily large otherwise.
     num_kwds = num_remainingkwds = len(keywords)
+    wrong_posonly = None
     for i in range(num_kwds):
         name = keywords[i]
         # If name was not encoded as a string, it could be None. In that
@@ -406,9 +457,21 @@ def _match_keywords(signature, blindargs, input_argcount,
         if name is None:
             continue
         j = signature.find_argname(name)
-        # if j == -1 nothing happens, because j < input_argcount and
-        # blindargs > j
+        if 0 <= j < co_posonlyargcount:
+            # we complain about a forbidden positional only keyword argument
+            # only if there is no **kwargs. otherwise, the keyword goes into
+            # the kwargs dict.
+            if signature.has_kwarg():
+                j = -1
+            else:
+                if wrong_posonly is None:
+                    wrong_posonly = []
+                wrong_posonly.append(signature.argnames[j])
+                continue
         if j < input_argcount:
+            # if j == -1 nothing happens, because j < input_argcount and
+            # blindargs > j
+
             # check that no keyword argument conflicts with these. note
             # that for this purpose we ignore the first blindargs,
             # which were put into place by prepend().  This way,
@@ -419,6 +482,8 @@ def _match_keywords(signature, blindargs, input_argcount,
         else:
             kwds_mapping[j - input_argcount] = i # map to the right index
             num_remainingkwds -= 1
+    if wrong_posonly:
+        raise ArgErrPosonlyAsKwds(wrong_posonly)
     return num_remainingkwds
 
 @jit.look_inside_iff(
@@ -452,55 +517,61 @@ class ArgErr(Exception):
     def getmsg(self):
         raise NotImplementedError
 
-class ArgErrCount(ArgErr):
 
-    def __init__(self, got_nargs, nkwds, signature,
-                 defaults_w, missing_args):
-        self.signature = signature
-
-        self.num_defaults = 0 if defaults_w is None else len(defaults_w)
-        self.missing_args = missing_args
-        self.num_args = got_nargs
-        self.num_kwds = nkwds
+class ArgErrMissing(ArgErr):
+    def __init__(self, missing, positional):
+        self.missing = missing
+        self.positional = positional  # keyword-only otherwise
 
     def getmsg(self):
-        n = self.signature.num_argnames()
-        if n == 0:
-            msg = "takes no arguments (%d given)" % (
-                self.num_args + self.num_kwds)
-        else:
-            defcount = self.num_defaults
-            has_kwarg = self.signature.has_kwarg()
-            num_args = self.num_args
-            num_kwds = self.num_kwds
-            if defcount == 0 and not self.signature.has_vararg():
-                msg1 = "exactly"
-                if not has_kwarg:
-                    num_args += num_kwds
-                    num_kwds = 0
-            elif not self.missing_args:
-                msg1 = "at most"
+        arguments_str = StringBuilder()
+        for i, arg in enumerate(self.missing):
+            if i == 0:
+                pass
+            elif i == len(self.missing) - 1:
+                if len(self.missing) == 2:
+                    arguments_str.append(" and ")
+                else:
+                    arguments_str.append(", and ")
             else:
-                msg1 = "at least"
-                has_kwarg = False
-                n -= defcount
-            if n == 1:
-                plural = ""
-            else:
-                plural = "s"
-            if has_kwarg or num_kwds > 0:
-                msg2 = " non-keyword"
-            else:
-                msg2 = ""
-            msg = "takes %s %d%s argument%s (%d given)" % (
-                msg1,
-                n,
-                msg2,
-                plural,
-                num_args)
+                arguments_str.append(", ")
+            arguments_str.append("'%s'" % arg)
+        msg = "missing %s required %s argument%s: %s" % (
+            len(self.missing),
+            "positional" if self.positional else "keyword-only",
+            "s" if len(self.missing) != 1 else "",
+            arguments_str.build())
         return msg
 
-class ArgErrCountMethod(ArgErrCount):
+
+class ArgErrTooMany(ArgErr):
+    def __init__(self, signature, num_defaults, given, kwonly_given):
+        self.signature = signature
+        self.num_defaults = num_defaults
+        self.given = given
+        self.kwonly_given = kwonly_given
+
+    def getmsg(self):
+        num_args = self.signature.num_argnames()
+        num_defaults = self.num_defaults
+        if num_defaults:
+            takes_str = "from %d to %d positional arguments" % (
+                num_args - num_defaults, num_args)
+        else:
+            takes_str = "%d positional argument%s" % (
+                num_args, "s" if num_args != 1 else "")
+        if self.kwonly_given:
+            given_str = ("%s positional argument%s "
+                         "(and %s keyword-only argument%s) were") % (
+                self.given, "s" if self.given != 1 else "",
+                self.kwonly_given, "s" if self.kwonly_given != 1 else "")
+        else:
+            given_str = "%s %s" % (
+                self.given, "were" if self.given != 1 else "was")
+        msg = "takes %s but %s given" % (takes_str, given_str)
+        return msg
+
+class ArgErrTooManyMethod(ArgErrTooMany):
     """ A subclass of ArgErrCount that is used if the argument matching is done
     as part of a method call, in which case more information is added to the
     error message, if the cause of the error is likely a forgotten `self`
@@ -508,9 +579,9 @@ class ArgErrCountMethod(ArgErrCount):
     """
 
     def getmsg(self):
-        msg = ArgErrCount.getmsg(self)
+        msg = ArgErrTooMany.getmsg(self)
         n = self.signature.num_argnames()
-        if (self.num_args == n + 1 and
+        if (self.given == n + 1 and
                 (n == 0 or self.signature.argnames[0] != "self")):
             msg += ". Did you forget 'self' in the function definition?"
         return msg
@@ -522,8 +593,7 @@ class ArgErrMultipleValues(ArgErr):
         self.argname = argname
 
     def getmsg(self):
-        msg = "got multiple values for keyword argument '%s'" % (
-            self.argname)
+        msg = "got multiple values for argument '%s'" % self.argname
         return msg
 
 class ArgErrUnknownKwds(ArgErr):
@@ -535,26 +605,24 @@ class ArgErrUnknownKwds(ArgErr):
         if num_remainingkwds == 1:
             for i in range(len(keywords)):
                 if i not in kwds_mapping:
-                    name = '?'
-                    # We'll assume it's unicode. Encode it.
-                    # Careful, I *think* it should not be possible to
-                    # get an IndexError here but you never know.
-                    try:
-                        if keyword_names_w is None:
-                            raise IndexError
-                        # note: negative-based indexing from the end
-                        w_name = keyword_names_w[i - len(keywords)]
-                    except IndexError:
-                        if keywords is None:
+                    name = keywords[i]
+                    if name is None:
+                        # We'll assume it's unicode. Encode it.
+                        # Careful, I *think* it should not be possible to
+                        # get an IndexError here but you never know.
+                        try:
+                            if keyword_names_w is None:
+                                raise IndexError
+                            # note: negative-based indexing from the end
+                            w_name = keyword_names_w[i - len(keywords)]
+                        except IndexError:
                             name = '?'
                         else:
-                            name = keywords[i]
-                    else:
-                        w_enc = space.newtext(space.sys.defaultencoding)
-                        w_err = space.newtext("replace")
-                        w_name = space.call_method(w_name, "encode", w_enc,
-                                                   w_err)
-                        name = space.text_w(w_name)
+                            w_enc = space.newtext(space.sys.defaultencoding)
+                            w_err = space.newtext("replace")
+                            w_name = space.call_method(w_name, "encode", w_enc,
+                                                       w_err)
+                            name = space.text_w(w_name)
                     break
         self.kwd_name = name
 
@@ -565,4 +633,17 @@ class ArgErrUnknownKwds(ArgErr):
         else:
             msg = "got %d unexpected keyword arguments" % (
                 self.num_kwds)
+        return msg
+
+
+class ArgErrPosonlyAsKwds(ArgErr):
+
+    def __init__(self, posonly_kwds):
+        self.posonly_kwds = posonly_kwds
+
+    def getmsg(self):
+        if len(self.posonly_kwds) == 1:
+            msg = ("got a positional-only argument passed as keyword argument: '%s'" % self.posonly_kwds[0])
+        else:
+            msg = ("got some positional-only arguments passed as keyword arguments: '%s'" % ", ".join(self.posonly_kwds))
         return msg

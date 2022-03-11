@@ -12,7 +12,7 @@ class AppTestMisc(AppTestCpythonExtensionBase):
                 '''),
                 ("fetch_value", "METH_NOARGS",
                 '''
-                    return PyInt_FromLong(my_flag);
+                    return PyLong_FromLong(my_flag);
                 '''),
             ], prologue='''
             static long my_flag = 0;

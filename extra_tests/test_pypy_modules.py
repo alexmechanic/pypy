@@ -16,31 +16,22 @@ expected_modules = []
 
 # ----- everywhere -----
 expected_modules += [
-    'MimeWriter',
+    '_opcode',
+    'asyncio',
     'bz2',
-    'commands',
-    'compiler',
-    '_ctypes',
-    'dircache',
-    'fpformat',
+    'code',
+    'ctypes.test',
     'gzip',
-    'htmllib',
-    'mhlib',
-    'mimetools',
+    '_hashlib',
+    'lzma',
     'mmap',
-    'multifile',
     '_multiprocessing',
     'multiprocessing.synchronize',
-    'mutex',
-    'new',
-    'sre',
-    'rfc822',
-    'sets',
+    'select',
     '_sqlite3',
     'ssl',
-    'thread',
+    '_thread',
     'threading',
-    'xmllib',
     'zlib',
 ]
 
@@ -51,19 +42,21 @@ if sys.platform != 'win32':
         'curses.ascii',
         'curses.textpad',
         'dbm',
+        'dbm.gnu',
         'fcntl',
-        'gdbm',
         'grp',
         'posix',
+        'pty',
         'pwd',
         'readline',
         'resource',
+        'syslog',
         'termios',
     ]
 else:
     # ----- Windows only -----
     expected_modules += [
-        '_winreg',
+        'winreg',
     ]
 
 # ----- Linux only -----

@@ -29,6 +29,11 @@ class FutureFlags(object):
 futureFlags_2_4 = FutureFlags((2, 4, 4, 'final', 0))
 futureFlags_2_5 = FutureFlags((2, 5, 0, 'final', 0))
 futureFlags_2_7 = FutureFlags((2, 7, 0, 'final', 0))
+futureFlags_3_2 = FutureFlags((3, 2, 0, 'final', 0))
+futureFlags_3_5 = FutureFlags((3, 5, 0, 'final', 0))
+futureFlags_3_7 = FutureFlags((3, 7, 0, 'final', 0))
+futureFlags_3_8 = FutureFlags((3, 8, 0, 'final', 0))
+futureFlags_3_9 = FutureFlags((3, 9, 0, 'final', 0))
 
 
 class TokenIterator:
@@ -85,17 +90,13 @@ def add_future_flags(future_flags, tokens):
     # permissive parsing of the given list of tokens; it relies on
     # the real parsing done afterwards to give errors.
     it.skip_newlines()
+    it.skip_name("r") or it.skip_name("u") or it.skip_name("ru")
+    if it.skip(pygram.tokens.STRING):
+        it.skip_newlines()
 
-    docstring_possible = True
-    while True:
-        it.skip_name("r") or it.skip_name("u") or it.skip_name("ru")
-        if docstring_possible and it.skip(pygram.tokens.STRING):
-            it.skip_newlines()
-            docstring_possible = False
-        if not (it.skip_name("from") and
+    while (it.skip_name("from") and
            it.skip_name("__future__") and
            it.skip_name("import")):
-            break
         it.skip(pygram.tokens.LPAR)    # optionally
         # return in 'last_position' any line-column pair that points
         # somewhere inside the last __future__ import statement
@@ -108,5 +109,8 @@ def add_future_flags(future_flags, tokens):
         it.skip(pygram.tokens.RPAR)    # optionally
         it.skip(pygram.tokens.SEMI)    # optionally
         it.skip_newlines()
+
+    # remove the flags that were specified but are anyway mandatory
+    result &= ~future_flags.mandatory_flags
 
     return result, last_position

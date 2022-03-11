@@ -3,7 +3,8 @@
 import sys
 if sys.platform == 'win32':
     #This module does not exist in windows
-    raise ImportError('No module named _curses')
+    raise ModuleNotFoundError('No module named _curses', name='_curses')
+import locale
 from functools import wraps
 
 from _curses_cffi import ffi, lib
@@ -166,15 +167,49 @@ def _mk_w_return_val(method_name):
 def _chtype(ch):
     return int(ffi.cast("chtype", ch))
 
-def _texttype(text):
-    if isinstance(text, str):
+def _bytestype(text):
+    if isinstance(text, bytes):
         return text
-    elif isinstance(text, unicode):
-        return str(text)   # default encoding
+    elif isinstance(text, str):
+        return text.encode()
     else:
-        raise TypeError("str or unicode expected, got a '%s' object"
+        raise TypeError("bytes or str expected, got a '%s' object"
                         % (type(text).__name__,))
 
+def _convert_to_chtype(win, obj):
+    if isinstance(obj, bytes) and len(obj) == 1:
+        value = ord(obj)
+    elif isinstance(obj, str):
+        if len(obj) != 1:
+            raise TypeError("expect bytes or str of length 1 or int, "
+                            "got a str of length %d", len(obj))
+        value = ord(obj)
+        if (128 < value):
+            if win:
+                encoding = win.encoding
+            else:
+                encoding = screen_encoding
+            b = obj.encode(encoding)
+            if len(bytes) == 1:
+                value = ord(b)
+            else:
+                OverflowError("byte doesn't fit in chtype")
+    elif isinstance(obj, int):
+        value = obj
+    else:
+        raise TypeError('expect bytes or str of length 1, or int, got %s' % type(obj))
+    return value
+
+def _convert_to_string(win, obj):
+    if isinstance(obj, str):
+        value = obj.encode(win.encoding)
+    elif isinstance(obj, bytes):
+        value = obj
+    else:
+        raise TypeError('expect bytes or str, got %s' % type(obj))
+    if b'\0' in value:
+        raise ValueError('embedded null character') 
+    return value
 
 def _extract_yx(args):
     if len(args) >= 2:
@@ -218,8 +253,17 @@ class error(Exception):
 
 
 class Window(object):
-    def __init__(self, window):
+    def __init__(self, window, encoding=None):
+        if encoding is None:
+            # CPython has a win32 branch here, but _curses is not supported
+            # on win32
+            codeset = locale.nl_langinfo(locale.CODESET)
+            if codeset:
+                encoding = codeset
+            else:
+                encoding = 'utf-8'
         self._win = window
+        self._encoding = encoding
 
     def __del__(self):
         if self._win != lib.stdscr:
@@ -288,7 +332,7 @@ class Window(object):
 
     @_argspec(1, 1, 2)
     def addstr(self, y, x, text, attr=None):
-        text = _texttype(text)
+        text = _convert_to_string(self, text)
         if attr is not None:
             attr_old = lib.getattrs(self._win)
             lib.wattrset(self._win, attr)
@@ -302,7 +346,7 @@ class Window(object):
 
     @_argspec(2, 1, 2)
     def addnstr(self, y, x, text, n, attr=None):
-        text = _texttype(text)
+        text = _convert_to_string(self, text)
         if attr is not None:
             attr_old = lib.getattrs(self._win)
             lib.wattrset(self._win, attr)
@@ -335,7 +379,15 @@ class Window(object):
                     _chtype(tl), _chtype(tr), _chtype(bl), _chtype(br))
         return None
 
-    def box(self, vertint=0, horint=0):
+    def box(self, *args):
+        if len(args) == 0:
+            vertint = 0
+            horint = 0
+        elif len(args) == 2:
+            vertint = _convert_to_chtype(self, args[0])
+            horint = _convert_to_chtype(self, args[1])
+        else:
+            raise TypeError('verch,horch required')
         lib.box(self._win, vertint, horint)
         return None
 
@@ -404,6 +456,20 @@ class Window(object):
         else:
             raise error("getch requires 0 or 2 arguments")
         return val
+
+    def get_wch(self, *args):
+        wch = ffi.new("wint_t[1]")
+        if len(args) == 0:
+            val = lib.wget_wch(self._win, wch)
+        elif len(args) == 2:
+            val = lib.mvwget_wch(self._win, *args, wch)
+        else:
+            raise error("get_wch requires 0 or 2 arguments")
+        _check_ERR(val, "get_wch")
+        if val == lib.KEY_CODE_YES:
+            return wch[0]
+        else:
+            return chr(wch[0])
 
     def getkey(self, *args):
         if len(args) == 0:
@@ -488,7 +554,7 @@ class Window(object):
 
     @_argspec(1, 1, 2)
     def insstr(self, y, x, text, attr=None):
-        text = _texttype(text)
+        text = _convert_to_string(self, text)
         if attr is not None:
             attr_old = lib.getattrs(self._win)
             lib.wattrset(self._win, attr)
@@ -502,7 +568,7 @@ class Window(object):
 
     @_argspec(2, 1, 2)
     def insnstr(self, y, x, text, n, attr=None):
-        text = _texttype(text)
+        text = _convert_to_string(self, text)
         if attr is not None:
             attr_old = lib.getattrs(self._win)
             lib.wattrset(self._win, attr)
@@ -562,6 +628,9 @@ class Window(object):
     def putwin(self, filep):
         # filestar = ffi.new("FILE *", filep)
         return _check_ERR(lib.putwin(self._win, filep), "putwin")
+        # XXX CPython 3.5 says: We have to simulate this by writing to
+        # a temporary FILE*, then reading back, then writing to the
+        # argument stream.
 
     def redrawln(self, beg, num):
         return _check_ERR(lib.wredrawln(self._win, beg, num), "redrawln")
@@ -593,7 +662,7 @@ class Window(object):
             win = lib.subpad(self._win, nlines, ncols, begin_y, begin_x)
         else:
             win = lib.subwin(self._win, nlines, ncols, begin_y, begin_x)
-        return Window(_check_NULL(win))
+        return Window(_check_NULL(win), self.encoding)
 
     def scroll(self, nlines=None):
         if nlines is None:
@@ -617,6 +686,23 @@ class Window(object):
             _check_ERR(lib.wmove(self._win, y, x), "wmove")
         return _check_ERR(lib.wvline(self._win, ch | attr, n), "vline")
 
+    @property
+    def encoding(self):
+        return self._encoding
+
+    @encoding.setter
+    def encoding(self, val):
+        if not val:
+            raise TypeError('encoding may not be deleted')
+        if not isinstance(val, str):
+            raise TypeError('setting encoding to a non-string')
+        encoding = val.encode('ascii')
+        self._encoding = val 
+
+    @encoding.deleter
+    def encoding(self):
+        raise TypeError('encoding may not be deleted')
+        
 
 beep = _mk_no_return("beep")
 def_prog_mode = _mk_no_return("def_prog_mode")
@@ -712,6 +798,7 @@ if lib._m_NCURSES_MOUSE_VERSION:
 
 
 def getwin(filep):
+    # XXX CPython 3.5: there's logic to use a temp file instead
     return Window(_check_NULL(lib.getwin(filep)))
 
 
@@ -803,7 +890,9 @@ def initscr():
     globals()["LINES"] = lib.LINES
     globals()["COLS"] = lib.COLS
 
-    return Window(win)
+    window = Window(win)
+    globals()['screen_encoding'] = window.encoding
+    return window
 
 
 def setupterm(term=None, fd=-1):
@@ -816,6 +905,8 @@ def setupterm(term=None, fd=-1):
 
     if term is None:
         term = ffi.NULL
+    elif isinstance(term, str):
+        term = term.encode()
     err = ffi.new("int *")
     if lib.setupterm(term, fd, err) == lib.ERR:
         err = err[0]
@@ -908,7 +999,7 @@ def pair_number(pairvalue):
 
 
 def putp(text):
-    text = _texttype(text)
+    text = _bytestype(text)
     return _check_ERR(lib.putp(text), "putp")
 
 
@@ -962,23 +1053,17 @@ def start_color():
 
 def tigetflag(capname):
     _ensure_initialised_setupterm()
-    if isinstance(capname, unicode):
-        capname = capname.encode('ascii')
-    return lib.tigetflag(capname)
+    return lib.tigetflag(capname.encode())
 
 
 def tigetnum(capname):
     _ensure_initialised_setupterm()
-    if isinstance(capname, unicode):
-        capname = capname.encode('ascii')
-    return lib.tigetnum(capname)
+    return lib.tigetnum(capname.encode())
 
 
 def tigetstr(capname):
     _ensure_initialised_setupterm()
-    if isinstance(capname, unicode):
-        capname = capname.encode('ascii')
-    val = lib.tigetstr(capname)
+    val = lib.tigetstr(capname.encode())
     if int(ffi.cast("intptr_t", val)) in (0, -1):
         return None
     return ffi.string(val)
@@ -986,6 +1071,13 @@ def tigetstr(capname):
 
 def tparm(fmt, i1=0, i2=0, i3=0, i4=0, i5=0, i6=0, i7=0, i8=0, i9=0):
     args = [ffi.cast("int", i) for i in (i1, i2, i3, i4, i5, i6, i7, i8, i9)]
+    # fmt is expected to be a byte string; CPython 3.x complains
+    # "TypeError: 'str' does not support the buffer interface", but we
+    # can do better.
+    if isinstance(fmt, str):
+        # error message modeled on "TypeError: must be str, not bytes"
+        # that you get if you call curses.tigetstr(b'...') on CPython 3.x
+        raise TypeError('must be bytes, not str')
     result = lib.tparm(fmt, *args)
     if result == ffi.NULL:
         raise error("tparm() returned NULL")
@@ -1005,6 +1097,17 @@ def unctrl(ch):
 def ungetch(ch):
     _ensure_initialised()
     return _check_ERR(lib.ungetch(_chtype(ch)), "ungetch")
+
+
+def unget_wch(ch):
+    _ensure_initialised()
+    if isinstance(ch, str):
+        if len(ch) != 1:
+            raise TypeError("expect bytes or str of length1, or int, "
+                            "got a str of length %d" % len(ch))
+    elif isinstance(ch, int): 
+        ch = chr(ch)
+    return _check_ERR(lib.unget_wch(ch), "unget_wch")
 
 
 def use_env(flag):

@@ -2,11 +2,14 @@
 Pointers.
 """
 
-from rpython.rlib import rposix
+import os
+
+from rpython.rlib import rposix, jit, rgc
+from rpython.rlib.objectmodel import we_are_translated
 from rpython.rlib.rarithmetic import ovfcheck
 from rpython.rtyper.annlowlevel import llstr
 from rpython.rtyper.lltypesystem import lltype, rffi
-from rpython.rtyper.lltypesystem.rstr import copy_string_to_raw
+from rpython.rtyper.lltypesystem.rstr import copy_string_to_raw, STR
 
 from pypy.interpreter.error import OperationError, oefmt, wrap_oserror
 from pypy.module._cffi_backend import cdataobj, misc, ctypeprim, ctypevoid
@@ -75,7 +78,7 @@ class W_CTypePtrOrArray(W_CType):
                 self._convert_array_from_listview(cdata, space.listview(w_ob))
         elif self.accept_str:
             if not space.isinstance_w(w_ob, space.w_bytes):
-                raise self._convert_error("str or list or tuple", w_ob)
+                raise self._convert_error("bytes or list or tuple", w_ob)
             s = space.bytes_w(w_ob)
             n = len(s)
             if self.length >= 0 and n > self.length:
@@ -297,8 +300,8 @@ class W_CTypePointer(W_CTypePtrBase):
         return W_CTypePtrBase.cast(self, w_ob)
 
     def prepare_file(self, w_ob):
-        from pypy.module._file.interp_file import W_File
-        if isinstance(w_ob, W_File):
+        from pypy.module._io.interp_iobase import W_IOBase
+        if isinstance(w_ob, W_IOBase):
             return prepare_file_argument(self.space, w_ob)
         else:
             return lltype.nullptr(rffi.CCHARP.TO)
@@ -351,26 +354,67 @@ class W_CTypePointer(W_CTypePtrBase):
 
     def convert_argument_from_object(self, cdata, w_ob, keepalives, i):
         # writes the pointer to cdata[0], writes the must-free flag in
-        # the byte just before cdata[0], and returns True if something
-        # must be done later to free.
+        # the byte just before cdata[0], and returns >0 if something
+        # must be done later to free. Description of flags in set_mustfree_flag
         from pypy.module._cffi_backend.ctypefunc import set_mustfree_flag
+        from pypy.module._cffi_backend.func import OffsetInBytes
+
         if isinstance(w_ob, cdataobj.W_CData):
             result = 0
         else:
             space = self.space
+            if self.accept_str and isinstance(w_ob, OffsetInBytes):
+                return self.process_str_from_offset_in_bytes(cdata, w_ob, keepalives, i)
             if self.accept_str and space.isinstance_w(w_ob, space.w_bytes):
                 # special case to optimize strings passed to a "char *" argument
                 value = space.bytes_w(w_ob)
-                if isinstance(self.ctitem, ctypeprim.W_CTypePrimitiveBool):
-                    self._must_be_string_of_zero_or_one(value)
-                keepalives[i] = misc.write_string_as_charp(cdata, value)
-                return True
+                return self.accept_movable_str(cdata, value, keepalives, i)
             result = self._prepare_pointer_call_argument(w_ob, cdata)
 
         if result == 0:
             self.convert_from_object(cdata, w_ob)
         set_mustfree_flag(cdata, result)
         return result == 1      # 0 or 2 => False, nothing to do later
+
+    @jit.dont_look_inside
+    def process_str_from_offset_in_bytes(self, cdata, w_ob, keepalives, i):
+        if not rgc.must_split_gc_address_space():
+            lldata = llstr(w_ob.bytes)
+            if not rgc.can_move(lldata):
+                # easy case - it can't move, pass it directly
+                self.accept_str_from_offset_in_bytes(cdata, lldata,
+                                           keepalives, i, w_ob.offset)
+                if not we_are_translated():
+                    keepalives[i] = lldata
+                    return 1
+                return 0
+            elif rgc.pin(lldata):
+                return self.accept_str_from_offset_in_bytes(cdata, lldata,
+                                               keepalives, i, w_ob.offset)
+        # we failed to pin, need to make a copy
+        value = w_ob.bytes
+        return self.accept_movable_str(cdata, value, keepalives, i)
+
+
+    def accept_movable_str(self, cdata, value, keepalives, i):
+        if isinstance(self.ctitem, ctypeprim.W_CTypePrimitiveBool):
+            self._must_be_string_of_zero_or_one(value)
+        keepalives[i] = misc.write_string_as_charp(cdata, value)
+        return 1
+
+    @jit.dont_look_inside
+    def accept_str_from_offset_in_bytes(self, cdata, lldata, keepalives, i, offset):
+        from rpython.rtyper.lltypesystem import llmemory
+        from rpython.rtyper.lltypesystem.rffi import offsetof, VOIDP, VOIDPP
+
+        addr = (llmemory.cast_ptr_to_adr(lldata) +
+              offsetof(STR, 'chars') +
+              llmemory.itemoffsetof(STR.chars, 0) + llmemory.sizeof(lltype.Char) * offset)
+        rffi.cast(VOIDPP, cdata)[0] = rffi.cast(VOIDP, addr)
+        if not we_are_translated():
+            keepalives[i] = lldata
+            return 3
+        return 0
 
     def getcfield(self, attr):
         from pypy.module._cffi_backend.ctypestruct import W_CTypeStructOrUnion
@@ -436,13 +480,17 @@ class CffiFileObj(object):
 
 
 def prepare_file_argument(space, w_fileobj):
-    w_fileobj.direct_flush()
+    from pypy.module._io.interp_iobase import W_IOBase
+    assert isinstance(w_fileobj, W_IOBase)
+    space.call_method(w_fileobj, "flush")
     if w_fileobj.cffi_fileobj is None:
-        fd = w_fileobj.direct_fileno()
+        fd = space.int_w(space.call_method(w_fileobj, "fileno"))
         if fd < 0:
             raise oefmt(space.w_ValueError, "file has no OS file descriptor")
+        fd = os.dup(fd)
+        mode = space.text_w(space.getattr(w_fileobj, space.newtext("mode")))
         try:
-            w_fileobj.cffi_fileobj = CffiFileObj(fd, w_fileobj.mode)
+            w_fileobj.cffi_fileobj = CffiFileObj(fd, mode)
         except OSError as e:
             raise wrap_oserror(space, e)
     return rffi.cast(rffi.CCHARP, w_fileobj.cffi_fileobj.llf)

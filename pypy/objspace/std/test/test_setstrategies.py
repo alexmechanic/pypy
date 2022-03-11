@@ -1,14 +1,22 @@
+import pytest
 from pypy.objspace.std.setobject import W_SetObject
 from pypy.objspace.std.setobject import (
     BytesIteratorImplementation, BytesSetStrategy, EmptySetStrategy,
     IntegerIteratorImplementation, IntegerSetStrategy, ObjectSetStrategy,
     UnicodeIteratorImplementation, AsciiSetStrategy)
 from pypy.objspace.std.listobject import W_ListObject
+from pypy.objspace.std.longobject import W_LongObject
+from rpython.rlib.rbigint import rbigint
+
 
 class TestW_SetStrategies:
 
-    def wrapped(self, l):
-        return W_ListObject(self.space, [self.space.wrap(x) for x in l])
+    def wrapped(self, l, bytes=False):
+        if bytes:
+            items_w = [self.space.newbytes(x) for x in l]
+        else:
+            items_w = [self.space.wrap(x) for x in l]
+        return W_ListObject(self.space, items_w)
 
     def test_from_list(self):
         s = W_SetObject(self.space, self.wrapped([1,2,3,4,5]))
@@ -23,7 +31,7 @@ class TestW_SetStrategies:
         s = W_SetObject(self.space, self.wrapped([]))
         assert s.strategy is self.space.fromcache(EmptySetStrategy)
 
-        s = W_SetObject(self.space, self.wrapped(["a", "b"]))
+        s = W_SetObject(self.space, self.wrapped(["a", "b"], bytes=True))
         assert s.strategy is self.space.fromcache(BytesSetStrategy)
 
         s = W_SetObject(self.space, self.wrapped([u"a", u"b"]))
@@ -54,7 +62,7 @@ class TestW_SetStrategies:
         s1 = W_SetObject(self.space, self.wrapped([1,2,3,4,5]))
         s2 = W_SetObject(self.space, self.wrapped([4,5, "six", "seven"]))
         s3 = s1.intersect(s2)
-        skip("for now intersection with ObjectStrategy always results in another ObjectStrategy")
+        pytest.skip("for now intersection with ObjectStrategy always results in another ObjectStrategy")
         assert s3.strategy is self.space.fromcache(IntegerSetStrategy)
 
     def test_clear(self):
@@ -89,7 +97,7 @@ class TestW_SetStrategies:
 
         s1 = W_SetObject(self.space, self.wrapped([1,2,3,4,5]))
         s1.descr_discard(self.space, self.space.wrap("five"))
-        skip("currently not supported")
+        pytest.skip("currently not supported")
         assert s1.strategy is self.space.fromcache(IntegerSetStrategy)
 
         set_discard__Set_ANY(self.space, s1, self.space.wrap(FakeInt(5)))
@@ -108,7 +116,7 @@ class TestW_SetStrategies:
 
         s1 = W_SetObject(self.space, self.wrapped([1,2,3,4,5]))
         assert not s1.has_key(self.space.wrap("five"))
-        skip("currently not supported")
+        pytest.skip("currently not supported")
         assert s1.strategy is self.space.fromcache(IntegerSetStrategy)
 
         assert s1.has_key(self.space.wrap(FakeInt(2)))
@@ -122,7 +130,7 @@ class TestW_SetStrategies:
         assert space.unwrap(it.next()) == 1
         assert space.unwrap(it.next()) == 2
         #
-        s = W_SetObject(space, self.wrapped(["a", "b"]))
+        s = W_SetObject(space, self.wrapped(["a", "b"], bytes=True))
         it = s.iter()
         assert isinstance(it, BytesIteratorImplementation)
         assert space.unwrap(it.next()) == "a"
@@ -139,8 +147,19 @@ class TestW_SetStrategies:
         s = W_SetObject(space, self.wrapped([1,2]))
         assert sorted(space.listview_int(s)) == [1, 2]
         #
-        s = W_SetObject(space, self.wrapped(["a", "b"]))
+        s = W_SetObject(space, self.wrapped(["a", "b"], bytes=True))
         assert sorted(space.listview_bytes(s)) == ["a", "b"]
         #
         #s = W_SetObject(space, self.wrapped([u"a", u"b"]))
         #assert sorted(space.listview_unicode(s)) == [u"a", u"b"]
+
+    def test_integer_strategy_with_w_long(self):
+        # tests all calls to is_plain_int1() so far
+        space = self.space
+        w = W_LongObject(rbigint.fromlong(42))
+        s1 = W_SetObject(space, self.wrapped([]))
+        s1.add(w)
+        assert s1.strategy is space.fromcache(IntegerSetStrategy)
+        #
+        s1 = W_SetObject(space, space.newlist([w]))
+        assert s1.strategy is space.fromcache(IntegerSetStrategy)

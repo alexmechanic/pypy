@@ -8,13 +8,13 @@ import tarfile, zipfile, sys
 
 class TestPackaging:
     def setup_class(cls):
-        # make sure we have sort of pypy-c
+        # make sure we have sort of pypy3-c
         if sys.platform == 'win32':
-            basename = 'pypy-c.exe'
-            cls.rename_pypy_c = 'pypy-c'
-            cls.exe_name_in_archive = 'pypy-c.exe'
+            basename = 'pypy3.9-c.exe'
+            cls.rename_pypy_c = 'pypy3.9-c'
+            cls.exe_name_in_archive = 'pypy3.9-c.exe'
         else:
-            basename = 'pypy-c'
+            basename = 'pypy3.9-c'
             cls.rename_pypy_c = package.POSIX_EXE
             cls.exe_name_in_archive = os.path.join('bin', package.POSIX_EXE)
         cls.pypy_c = py.path.local(pypydir).join('goal', basename)
@@ -27,20 +27,26 @@ class TestPackaging:
             _fake=True)
         assert retval == 0
         prefix = builddir.join(test)
-        cpyver = '%d.%d' % CPYTHON_VERSION[:2]
-        assert prefix.join('lib-python', cpyver, 'test').check()
         assert prefix.join(self.exe_name_in_archive).check()
-        assert prefix.join('lib_pypy', 'syslog.py').check()
-        assert not prefix.join('lib_pypy', 'py').check()
-        assert not prefix.join('lib_pypy', 'ctypes_configure').check()
+        cpyver = 'pypy%d.%d' % CPYTHON_VERSION[:2]
+        if sys.platform == 'win32':
+            stdlib = prefix.join('lib',)
+            stdpath = 'lib'
+        else:
+            stdlib = prefix.join('lib', cpyver)
+            stdpath = 'lib/%s' % cpyver
+        assert stdlib.join('test').check()
+        assert stdlib.join('syslog.py').check()
+        assert not stdlib.join('py').check()
+        assert not stdlib.join('ctypes_configure').check()
         assert prefix.join('LICENSE').check()
         assert prefix.join('README.rst').check()
         if package.USE_ZIPFILE_MODULE:
             zh = zipfile.ZipFile(str(builddir.join('%s.zip' % test)))
-            assert zh.open('%s/lib_pypy/syslog.py' % test)
+            assert zh.open('%s/%s/syslog.py' % (test, stdpath))
         else:
             th = tarfile.open(str(builddir.join('%s.tar.bz2' % test)))
-            syslog = th.getmember('%s/lib_pypy/syslog.py' % test)
+            syslog = th.getmember('%s/%s/syslog.py' % (test, stdpath))
             exe = th.getmember('%s/%s' % (test, self.exe_name_in_archive))
             assert syslog.mode == 0644
             assert exe.mode == 0755
@@ -54,10 +60,16 @@ class TestPackaging:
 
         # the headers file could be not there, because they are copied into
         # trunk/include only during translation
-        includedir = py.path.local(pypydir).dirpath().join('include')
+        if sys.platform == 'win32':
+            includedir = py.path.local(pypydir).dirpath().join('include')
+        else:
+            includedir = py.path.local(pypydir).dirpath().join('include', cpyver)
         def check_include(name):
             if includedir.join(name).check(file=True):
-                member = '%s/include/%s' % (test, name)
+                if sys.platform == 'win32':
+                    member = '%s/include/%s' % (test, name)
+                else:
+                    member = '%s/include/%s/%s' % (test, cpyver, name)
                 if package.USE_ZIPFILE_MODULE:
                     assert zh.open(member)
                 else:
@@ -96,7 +108,7 @@ def test_fix_permissions(tmpdir):
     bin   = tmpdir.join('bin')  .ensure(dir=True)
     file1 = tmpdir.join('file1').ensure(file=True)
     file2 = mydir .join('file2').ensure(file=True)
-    pypy  = bin   .join('pypy') .ensure(file=True)
+    pypy  = bin   .join('pypy3').ensure(file=True)
     #
     mydir.chmod(0700)
     bin.chmod(0700)

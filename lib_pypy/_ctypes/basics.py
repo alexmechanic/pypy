@@ -102,22 +102,12 @@ class _CDataMeta(type):
         if self._is_abstract():
             raise TypeError('abstract class')
         size = self._sizeofinstances()
-        if isinstance(obj, (str, unicode)):
-            # hack, buffer(str) will always return a readonly buffer.
-            # CPython calls PyObject_AsWriteBuffer(...) here!
-            # str cannot be modified, thus raise a type error in this case
-            raise TypeError("Cannot use %s as modifiable buffer" % str(type(obj)))
-
-        # why not just call memoryview(obj)[offset:]?
-        # array in Python 2.7 does not support the buffer protocol and will
-        # fail, even though buffer is supported
-        buf = buffer(obj, offset, size)
-
-        if len(buf) < size:
+        buf = memoryview(obj)
+        if buf.nbytes < offset + size:
             raise ValueError(
                 "Buffer size too small (%d instead of at least %d bytes)"
-                % (len(buf) + offset, size + offset))
-        raw_addr = buf._pypy_raw_address()
+                % (buf.nbytes, offset + size))
+        raw_addr = buf._pypy_raw_address() + offset
         result = self.from_address(raw_addr)
         objects = result._ensure_objects()
         if objects is not None:
@@ -130,17 +120,17 @@ class _CDataMeta(type):
         if self._is_abstract():
             raise TypeError('abstract class')
         size = self._sizeofinstances()
-        buf = buffer(obj, offset, size)
-        if len(buf) < size:
+        buf = memoryview(obj)
+        if buf.nbytes < offset + size:
             raise ValueError(
                 "Buffer size too small (%d instead of at least %d bytes)"
-                % (len(buf) + offset, size + offset))
+                % (buf.nbytes, offset + size))
         result = self._newowninstance_()
         dest = result._buffer.buffer
         try:
-            raw_addr = buf._pypy_raw_address()
+            raw_addr = buf._pypy_raw_address() + offset
         except ValueError:
-            _rawffi.rawstring2charp(dest, buf)
+            _rawffi.rawstring2charp(dest, buf, offset, size)
         else:
             from ctypes import memmove
             memmove(dest, raw_addr, size)
@@ -176,10 +166,9 @@ class CArgObject(object):
     def __ne__(self, other):
         return self._obj != other
 
-class _CData(bufferable):
+class _CData(bufferable, metaclass=_CDataMeta):
     """ The most basic object for all ctypes types
     """
-    __metaclass__ = _CDataMeta
     _objects = None
     _ffiargtype = None
 
@@ -257,7 +246,7 @@ def byref(cdata, offset=0):
 
 def cdata_from_address(self, address):
     # fix the address: turn it into as unsigned, in case it's a negative number
-    address = address & (sys.maxint * 2 + 1)
+    address = address & (sys.maxsize * 2 + 1)
     instance = self.__new__(self)
     lgt = getattr(self, '_length_', 1)
     instance._buffer = self._ffiarray.fromaddress(address, lgt)

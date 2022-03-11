@@ -26,6 +26,8 @@ class TestW_ListObject(object):
         assert self.space.eq_w(self.space.len(w_list), w(1))
         w_list = W_ListObject(self.space, [w(5), w(3), w(99)]*111)
         assert self.space.eq_w(self.space.len(w_list), w(333))
+        w_list = W_ListObject(self.space, [w(u'\u2039')])
+        assert self.space.eq_w(self.space.len(w_list), w(1))
 
     def test_getitem(self):
         w = self.space.wrap
@@ -121,8 +123,8 @@ class TestW_ListObject(object):
         assert self.space.eq_w(self.space.next(w_iter), w(5))
         assert self.space.eq_w(self.space.next(w_iter), w(3))
         assert self.space.eq_w(self.space.next(w_iter), w(99))
-        raises(OperationError, self.space.next, w_iter)
-        raises(OperationError, self.space.next, w_iter)
+        py.test.raises(OperationError, self.space.next, w_iter)
+        py.test.raises(OperationError, self.space.next, w_iter)
 
     def test_contains(self):
         w = self.space.wrap
@@ -497,15 +499,15 @@ class AppTestListObject(object):
 
     def test_doc(self):
         assert list.__doc__ == "list() -> new empty list\nlist(iterable) -> new list initialized from iterable's items"
-        assert list.__new__.__doc__ == "T.__new__(S, ...) -> a new object with type S, a subtype of T"
-        assert list.__init__.__doc__ == "x.__init__(...) initializes x; see help(type(x)) for signature"
+        assert list.__new__.__doc__ == "Create and return a new object.  See help(type) for accurate signature."
+        assert list.__init__.__doc__ == "Initialize self.  See help(type(self)) for accurate signature."
 
     def test_getstrategyfromlist_w(self):
         l0 = ["a", "2", "a", True]
         # this raised TypeError on ListStrategies
         l1 = ["a", "2", True, "a"]
         l2 = [1, "2", "a", "a"]
-        assert sorted(l1) == sorted(l2)
+        assert set(l1) == set(l2)
 
     def test_notequals(self):
         assert [1,2,3,4] != [1,2,5,4]
@@ -575,13 +577,13 @@ class AppTestListObject(object):
         foo_list = [foo1, foo2, foo3]
         foo42 in foo_list
         logger_copy = logger[:]  # prevent re-evaluation during pytest error print
-        assert logger_copy == [(foo42, foo1), (foo42, foo2), (foo42, foo3)]
+        assert logger_copy == [(foo1, foo42), (foo2, foo42), (foo3, foo42)]
 
         del logger[:]
         foo2_bis = Foo(2, '2 bis')
         foo2_bis in foo_list
         logger_copy = logger[:]  # prevent re-evaluation during pytest error print
-        assert logger_copy == [(foo2_bis, foo1), (foo2_bis, foo2)]
+        assert logger_copy == [(foo1, foo2_bis), (foo2, foo2_bis)]
 
     def test_call_list(self):
         assert list('') == []
@@ -590,7 +592,6 @@ class AppTestListObject(object):
         l = [1]
         assert list(l) is not l
         assert list(l) == l
-        assert list(range(10)) == range(10)
 
     def test_explicit_new_init(self):
         l = l0 = list.__new__(list)
@@ -613,13 +614,13 @@ class AppTestListObject(object):
             assert l == list(assignment)
 
     def test_range_init(self):
-        x = range(5,1)
+        x = list(range(5,1))
         assert x == []
 
-        x = range(1,10)
+        x = list(range(1,10))
         x[22:0:-1] == range(1,10)
 
-        r = range(10, 10)
+        r = list(range(10, 10))
         assert len(r) == 0
         assert list(reversed(r)) == []
         assert r[:] == []
@@ -635,9 +636,9 @@ class AppTestListObject(object):
         l = ['a']
         l.extend([0])
         assert l == ['a', 0]
-        l = range(10)
+        l = list(range(10))
         l.extend([10])
-        assert l == range(11)
+        assert l == list(range(11))
 
         l = []
         m = [1,2,3]
@@ -705,18 +706,6 @@ class AppTestListObject(object):
         l.sort()
         assert l == [1.1, 2.2, 3.1, 3.3, 4.4, 5.5]
 
-    def test_sort_cmp(self):
-        def lencmp(a,b): return cmp(len(a), len(b))
-        l = [ 'a', 'fiver', 'tre', '' ]
-        l.sort(lencmp)
-        assert l == ['', 'a', 'tre', 'fiver']
-        l = []
-        l.sort(lencmp)
-        assert l == []
-        l = [ 'a' ]
-        l.sort(lencmp)
-        assert l == [ 'a' ]
-
     def test_sort_key(self):
         def lower(x): return x.lower()
         l = ['a', 'C', 'b']
@@ -729,20 +718,21 @@ class AppTestListObject(object):
         l.sort(key=lower)
         assert l == ['a']
 
-        r = range(10)
+        r = list(range(10))
         r.sort(key=lambda x: -x)
-        assert r == range(9, -1, -1)
+        assert r == list(range(9, -1, -1))
 
     def test_sort_reversed(self):
-        l = range(10)
+        l = list(range(10))
         l.sort(reverse=True)
-        assert l == range(9, -1, -1)
+        assert l == list(range(9, -1, -1))
         l = []
         l.sort(reverse=True)
         assert l == []
         l = [1]
         l.sort(reverse=True)
         assert l == [1]
+        raises(TypeError, sorted, [], None, lambda x, y: 0)
 
     def test_sort_cmp_key_reverse(self):
         def lower(x): return x.lower()
@@ -756,7 +746,7 @@ class AppTestListObject(object):
         assert l == ["a", "b", "c", "d"]
 
     def test_sort_range(self):
-        l = range(3, 10, 3)
+        l = list(range(3, 10, 3))
         l.sort()
         assert l == [3, 6, 9]
         l.sort(reverse=True)
@@ -818,7 +808,7 @@ class AppTestListObject(object):
         l[0] = "2"
         assert l == ["2",3]
 
-        l = range(3)
+        l = list(range(3))
         l[0] = 1
         assert l == [1,1,2]
 
@@ -853,12 +843,12 @@ class AppTestListObject(object):
         assert l is l0
         raises(IndexError, "del l[0]")
 
-        l = range(10)
+        l = list(range(10))
         del l[5]
         assert l == [0, 1, 2, 3, 4, 6, 7, 8, 9]
 
     def test_getitem_slice(self):
-        l = range(10)
+        l = list(range(10))
         assert l[::] == l
         del l[::2]
         assert l == [1,3,5,7,9]
@@ -892,7 +882,7 @@ class AppTestListObject(object):
         assert x[10:0] == []
         assert x[10:0:None] == []
 
-        x = range(1,5)
+        x = list(range(1,5))
         assert x[10:0] == []
         assert x[10:0:None] == []
 
@@ -903,7 +893,7 @@ class AppTestListObject(object):
         assert x[-1:10:None] == [4]
 
     def test_getslice_range_backwards(self):
-        x = range(1,10)
+        x = list(range(1,10))
         assert x[22:-10] == []
         assert x[22:-10:-1] == [9,8,7,6,5,4,3,2,1]
         assert x[10:3:-1] == [9,8,7,6,5]
@@ -924,8 +914,22 @@ class AppTestListObject(object):
         del l[:]
         assert l == []
 
-        l = range(5)
-        del l[:]
+    def test_clear(self):
+        l = l0 = [1,2,3]
+        l.clear()
+        assert l is l0
+        assert l == []
+
+        l = ['a', 'b']
+        l.clear()
+        assert l == []
+
+        l = [1.1, 2.2]
+        l.clear()
+        assert l == []
+
+        l = []
+        l.clear()
         assert l == []
 
     def test_iadd(self):
@@ -947,7 +951,7 @@ class AppTestListObject(object):
         l1 += [0]
         assert l1 == ['a', 'b', 'c', 0]
 
-        r1 = r2 = range(5)
+        r1 = r2 = list(range(5))
         assert r1 is r2
         r1 += [15]
         assert r1 is r2
@@ -974,10 +978,6 @@ class AppTestListObject(object):
         l2 = [4,5,6]
         l3 = l1 + l2
         assert l3 == [1,2,3,4,5,6]
-
-        l4 = range(3)
-        l5 = l4 + l2
-        assert l5 == [0,1,2,4,5,6]
 
     def test_imul(self):
         l = l0 = [4,3]
@@ -1008,11 +1008,11 @@ class AppTestListObject(object):
         assert l is l0
         assert l == [1.1, 2.2, 1.1, 2.2]
 
-        l = range(2)
+        l = list(range(2))
         l *= 2
         assert l == [0, 1, 0, 1]
 
-        r1 = r2 = range(3)
+        r1 = r2 = list(range(3))
         assert r1 is r2
         r1 *= 2
         assert r1 is r2
@@ -1045,7 +1045,7 @@ class AppTestListObject(object):
         raises(TypeError, "[0]*MyIndex(MyInt(3))")
 
     def test_index(self):
-        c = range(10)
+        c = list(range(10))
         assert c.index(0) == 0
         raises(ValueError, c.index, 10)
 
@@ -1084,13 +1084,13 @@ class AppTestListObject(object):
         assert c.index('l', None, 4) == 2
 
     def test_ass_slice(self):
-        l = range(6)
+        l = list(range(6))
         l[1:3] = 'abc'
         assert l == [0, 'a', 'b', 'c', 3, 4, 5]
         l = []
         l[:-3] = []
         assert l == []
-        l = range(6)
+        l = list(range(6))
         l[:] = []
         assert l == []
 
@@ -1105,7 +1105,7 @@ class AppTestListObject(object):
 
         l = []
         l2 = range(3)
-        l.__setslice__(0,3,l2)
+        l.__setitem__(slice(0,3),l2)
         assert l == [0,1,2]
 
     def test_assign_extended_slice(self):
@@ -1124,7 +1124,7 @@ class AppTestListObject(object):
         raises(ValueError, "l[0:2:2] = [1,2,3,4]")
         raises(ValueError, "l[::2] = []")
 
-        l = range(6)
+        l = list(range(6))
         l[::3] = ('a', 'b')
         assert l == ['a', 1, 2, 'b', 4, 5]
 
@@ -1206,6 +1206,32 @@ class AppTestListObject(object):
         l.append(l)
         assert repr(l) == '[[...]]'
 
+    def test_copy(self):
+        # test that empty list copies the empty list
+        l = []
+        c = l.copy()
+        assert c == []
+
+        # test that the items of a list are the same
+        l = list(range(3))
+        c = l.copy()
+        assert l == c
+
+        # test that it's indeed a copy and not a reference
+        l = ['a', 'b']
+        c = l.copy()
+        c.append('i')
+        assert l == ['a', 'b']
+        assert c == l + ['i']
+
+        # test that it's a shallow, not a deep copy
+        l = [1, 2, [3, 4], 5]
+        c = l.copy()
+        assert l == c
+        assert c[3] == l[3]
+
+        raises(TypeError, l.copy, None)
+
     def test_append(self):
         l = []
         l.append('X')
@@ -1219,7 +1245,7 @@ class AppTestListObject(object):
         assert l == [0]
         for x in range(1, 5):
             l.append(x)
-        assert l == range(5)
+        assert l == list(range(5))
 
         l = [1,2,3]
         l.append("a")
@@ -1229,19 +1255,19 @@ class AppTestListObject(object):
         l.append(4.4)
         assert l == [1.1, 2.2, 3.3, 4.4]
 
-        l = range(4)
+        l = list(range(4))
         l.append(4)
-        assert l == range(5)
+        assert l == list(range(5))
 
-        l = range(5)
+        l = list(range(5))
         l.append(26)
         assert l == [0,1,2,3,4,26]
 
-        l = range(5)
+        l = list(range(5))
         l.append("a")
         assert l == [0,1,2,3,4,"a"]
 
-        l = range(5)
+        l = list(range(5))
         l.append(5)
         assert l == [0,1,2,3,4,5]
 
@@ -1272,7 +1298,7 @@ class AppTestListObject(object):
         l.insert(0,"a")
         assert l == ["a", 1, 2, 3]
 
-        l = range(3)
+        l = list(range(3))
         l.insert(1,5)
         assert l == [0,5,1,2]
 
@@ -1285,9 +1311,9 @@ class AppTestListObject(object):
         raises(IndexError, c.pop)
         assert len(c) == 0
 
-        l = range(10)
+        l = list(range(10))
         l.pop()
-        assert l == range(9)
+        assert l == list(range(9))
         assert l.pop(0) == 0
 
         l = [1.1, 2.2, 3.3]
@@ -1305,16 +1331,16 @@ class AppTestListObject(object):
             def __int__(self):
                 return self.x
 
-        l = range(10)
+        l = list(range(10))
         x = l.pop(A(-1))
         assert x == 9
-        assert l == range(9)
-        raises(TypeError, range(10).pop, 1.0)
+        assert l == list(range(9))
+        raises(TypeError, list(range(10)).pop, 1.0)
 
     def test_pop_negative(self):
         l1 = [1,2,3,4]
         l2 = ["1", "2", "3", "4"]
-        l3 = range(5)
+        l3 = list(range(5))
         l4 = [1, 2, 3, "4"]
         l5 = [1.1, 2.2, 3.3, 4.4]
 
@@ -1341,7 +1367,7 @@ class AppTestListObject(object):
         raises(ValueError, c.remove, 'l')
         assert ''.join(c) == 'heo word'
 
-        l = range(5)
+        l = list(range(5))
         l.remove(2)
         assert l == [0, 1, 3, 4]
         l = [0, 3, 5]
@@ -1361,11 +1387,11 @@ class AppTestListObject(object):
         c.reverse()
         assert ''.join(c) == 'dlrow olleh'
 
-        l = range(3)
+        l = list(range(3))
         l.reverse()
         assert l == [2,1,0]
 
-        r = range(3)
+        r = list(range(3))
         r[0] = 1
         assert r == [1, 1, 2]
         r.reverse()
@@ -1421,7 +1447,7 @@ class AppTestListObject(object):
                 skip("not reliable on top of Boehm")
         class A(object):
             def __del__(self):
-                print 'del'
+                print('del')
                 del lst[:]
         for i in range(10):
             keepalive = []
@@ -1430,40 +1456,22 @@ class AppTestListObject(object):
             while lst:
                 keepalive.append(lst[:])
 
-    def test___getslice__(self):
-        l = [1,2,3,4]
-        res = l.__getslice__(0, 2)
-        assert res == [1, 2]
-
-        l = []
-        assert l.__getslice__(0,2) == []
-
-    def test___setslice__(self):
-        l = [1,2,3,4]
-        l.__setslice__(0, 2, [5, 6])
-        assert l == [5, 6, 3, 4]
-
-        l = []
-        l.__setslice__(0,0,[3,4,5])
-        assert l == [3,4,5]
-
-    def test___delslice__(self):
-        l = [1,2,3,4]
-        l.__delslice__(0, 2)
-        assert l == [3, 4]
-
     def test_unicode(self):
-        s = u"\ufffd\ufffd\ufffd"
-        assert s.encode("ascii", "replace") == "???"
-        assert s.encode("ascii", "ignore") == ""
+        s = "\ufffd\ufffd\ufffd"
+        assert s.encode("ascii", "replace") == b"???"
+        assert s.encode("ascii", "ignore") == b""
         l1 = [s.encode("ascii", "replace")]
-        assert l1[0] == "???"
+        assert l1[0] == b"???"
 
         l2 = [s.encode("ascii", "ignore")]
-        assert l2[0] == ""
+        assert l2[0] == b""
 
         l3 = [s]
-        assert l1[0].encode("ascii", "replace") == "???"
+        assert l3[0].encode("ascii", "replace") == b"???"
+
+        s = u"\u2039"
+        l1 = list(s)
+        assert len(l1) == 1
 
     def test_unicode_bug_in_listview_utf8(self):
         l1 = list(u'\u1234\u2345')
@@ -1483,6 +1491,10 @@ class AppTestListObject(object):
         assert l == []
         assert list(g) == []
 
+    def test_list_from_bytes(self):
+        b = list(b'abc')
+        assert b == [97, 98, 99]
+
     def test_uses_custom_iterator(self):
         # obscure corner case: space.listview*() must not shortcut subclasses
         # of dicts, because the OrderedDict in the stdlib relies on this.
@@ -1490,12 +1502,12 @@ class AppTestListObject(object):
         # strategies, to avoid surprizes depending on the strategy.
         class X: pass
         for base, arg in [
-                (list, []), (list, [5]), (list, ['x']), (list, [X]), (list, [u'x']),
-                (set, []),  (set,  [5]), (set,  ['x']), (set, [X]), (set, [u'x']),
+                (list, []), (list, [5]), (list, ['x']), (list, [X]), (list, ['x']),
+                (set, []),  (set,  [5]), (set,  ['x']), (set, [X]), (set, ['x']),
                 (dict, []), (dict, [(5,6)]), (dict, [('x',7)]), (dict, [(X,8)]),
-                (dict, [(u'x', 7)]),
+                (dict, [('x', 7)]),
                 ]:
-            print base, arg
+            print(base, arg)
             class SubClass(base):
                 def __iter__(self):
                     return iter("foobar")
@@ -1580,7 +1592,7 @@ class AppTestListObject(object):
     def test_use_method_for_wrong_object(self):
         if self.on_cpython:
             skip('pypy-only test')
-        raises(TypeError, list.append.im_func, 1, 2)
+        raises(TypeError, list.append, 1, 2)
 
     def test_ne_NotImplemented(self):
         class NonList(object):
@@ -1604,25 +1616,25 @@ class AppTestListObject(object):
         assert list(L([5, 6])) == ["ok"]
         assert list(L([5.2, 6.3])) == ["ok"]
         #
-        class S(str):
+        class S(bytes):
             def __iter__(self):
                 yield "ok"
-        assert list(S("don't see me")) == ["ok"]
+        assert list(S(b"don't see me")) == ["ok"]
         #
-        class U(unicode):
+        class U(str):
             def __iter__(self):
                 yield "ok"
-        assert list(U(u"don't see me")) == ["ok"]
+        assert list(U("don't see me")) == ["ok"]
         #
-        class S(str):
+        class S(bytes):
             def __getitem__(self, index):
-                return str.__getitem__(self, index).upper()
-        assert list(S("abc")) == list("ABC")
+                never_called
+        assert list(S(b"abc")) == list(b"abc")   # __getitem__ ignored
         #
-        class U(unicode):
+        class U(str):
             def __getitem__(self, index):
-                return unicode.__getitem__(self, index).upper()
-        assert list(U(u"abc")) == list(u"ABC")
+                never_called
+        assert list(U("abc")) == list("abc")     # __getitem__ ignored
 
     def test_extend_from_nonempty_list_with_subclasses(self):
         l = ["hi!"]
@@ -1637,62 +1649,40 @@ class AppTestListObject(object):
         l.extend(L([5, 6]))
         l.extend(L([5.2, 6.3]))
         #
-        class S(str):
+        class S(bytes):
             def __iter__(self):
                 yield "okS"
-        l.extend(S("don't see me"))
+        l.extend(S(b"don't see me"))
         #
-        class U(unicode):
+        class U(str):
             def __iter__(self):
                 yield "okU"
-        l.extend(U(u"don't see me"))
+        l.extend(U("don't see me"))
         #
         assert l == ["hi!", "okT", "okL", "okL", "okS", "okU"]
         #
-        class S(str):
+        class S(bytes):
             def __getitem__(self, index):
-                return str.__getitem__(self, index).upper()
+                never_called
         l = []
-        l.extend(S("abc"))
-        assert l == list("ABC")
+        l.extend(S(b"abc"))
+        assert l == list(b"abc")    # __getitem__ ignored
         #
-        class U(unicode):
+        class U(str):
             def __getitem__(self, index):
-                return unicode.__getitem__(self, index).upper()
+                never_called
         l = []
-        l.extend(U(u"abc"))
-        assert l == list(u"ABC")
-
-    def test_no_len_on_range_iter(self):
-        iterable = range(10)
-        raises(TypeError, len, iter(iterable))
-
-    def test_reduce(self):
-        if self.on_cpython:
-            skip("cpython raises TypeError")  # XXX investigate
-        it = iter(range(10))
-        assert it.next() == 0
-        assert it.next() == 1
-        assert it.next() == 2
-        assert it.next() == 3
-        seqiter_new, args = it.__reduce__()
-        assert it.next() == 4
-        assert it.next() == 5
-        it2 = seqiter_new(*args)
-        assert it2.next() == 4
-        assert it2.next() == 5
-        it3 = seqiter_new(*args)
-        assert it3.next() == 4
-        assert it3.next() == 5
+        l.extend(U("abc"))
+        assert l == list("abc")     # __getitem__ ignored
 
     def test_issue1266(self):
-        l = range(1)
+        l = list(range(1))
         l.pop()
         # would previously crash
         l.append(1)
         assert l == [1]
 
-        l = range(1)
+        l = list(range(1))
         l.pop()
         # would previously crash
         l.reverse()
@@ -1701,17 +1691,17 @@ class AppTestListObject(object):
     def test_issue1266_ovf(self):
         import sys
 
-        l = range(0, sys.maxint, sys.maxint)
-        l.append(sys.maxint)
+        l = list(range(0, sys.maxsize, sys.maxsize))
+        l.append(sys.maxsize)
         # -2 would be next in the range sequence if overflow were
         # allowed
         l.append(-2)
-        assert l == [0, sys.maxint, -2]
+        assert l == [0, sys.maxsize, -2]
         assert -2 in l
 
-        l = range(-sys.maxint, sys.maxint, sys.maxint // 10)
+        l = list(range(-sys.maxsize, sys.maxsize, sys.maxsize // 10))
         item11 = l[11]
-        assert l[::11] == [-sys.maxint, item11]
+        assert l[::11] == [-sys.maxsize, item11]
         assert item11 in l[::11]
 
     def test_bug_list_of_nans(self):
@@ -1738,105 +1728,14 @@ class AppTestListObject(object):
             assert L3.index(0.0, i) == i
             assert L3.index(-0.0, i) == i
 
+    def test_list_new_pos_only(self):
+        with raises(TypeError):
+            list(sequence=[])
 
-class AppTestRangeListForcing:
-    """Tests for range lists that test forcing. Regular tests should go in
-    AppTestListObject so they can be run -A against CPython as well. Separate
-    from AppTestListObjectWithRangeList so we don't silently overwrite tests
-    with the same names.
-    """
-    spaceconfig = {"objspace.std.withliststrategies": True}
-
-    def setup_class(cls):
-        if cls.runappdirect:
-            py.test.skip("__pypy__.internal_repr() cannot be used to see "
-                         "if a range list was forced on top of pypy-c")
-        cls.w_not_forced = cls.space.appexec([], """():
-            import __pypy__
-            def f(r):
-                return (isinstance(r, list) and
-                        "RangeListStrategy" in __pypy__.internal_repr(r))
-            return f
-        """)
-
-    def test_simple(self):
-        result = []
-        r = range(1, 8, 2)
-        for i in r:
-            result.append(i)
-        assert result == [1, 3, 5, 7]
-        assert self.not_forced(r)
-
-    def test_getitem_slice(self):
-        result = []
-        r = range(1, 100, 2)
-        for i in r[10:15]:
-            result.append(i)
-        assert result == [21, 23, 25, 27, 29]
-        assert not self.not_forced(r)
-
-    def test_getitem_extended_slice(self):
-        result = []
-        r = range(1, 100, 2)
-        for i in r[40:30:-2]:
-            result.append(i)
-        assert result == [81, 77, 73, 69, 65]
-        assert not self.not_forced(r)
-
-    def test_repr(self):
-        r = range(5)
-        assert repr(r) == "[0, 1, 2, 3, 4]"
-        assert self.not_forced(r)
-
-    def test_force(self):
-        r = range(10)
-        r[0] = 42
-        assert not self.not_forced(r)
-        assert r == [42, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-
-    def test_reverse(self):
-        r = range(10)
-        r.reverse()
-        assert not self.not_forced(r)
-        assert r == range(9, -1, -1)
-
-    def test_pop(self):
-        # RangeListStrategy
-        r = range(1, 10)
-        res = r.pop()
-        assert res == 9
-        assert self.not_forced(r)
-        assert repr(r) == repr(range(1, 9))
-        res = r.pop(0)
-        assert res == 1
-        assert self.not_forced(r)
-        assert repr(r) == repr(range(2, 9))
-        res = r.pop(len(r) - 1)
-        assert res == 8
-        assert self.not_forced(r)
-        assert repr(r) == repr(range(2, 8))
-        res = r.pop(2)
-        assert res == 4
-        assert not self.not_forced(r)
-        assert r == [2, 3, 5, 6, 7]
-        res = r.pop(2)
-        assert res == 5
-        assert not self.not_forced(r)
-        assert r == [2, 3, 6, 7]
-
-        # SimpleRangeListStrategy
-        r = range(10)
-        res = r.pop()
-        assert res == 9
-        assert self.not_forced(r)
-        res = r.pop()
-        assert res == 8
-        assert repr(r) == repr(range(8))
-        assert self.not_forced(r)
-        res = r.pop(0)
-        assert res == 0
-        assert not self.not_forced(r)
-        assert r == [1, 2, 3, 4, 5, 6, 7]
+    def test_generic_alias(self):
+        ga = list[int]
+        assert ga.__origin__ is list
+        assert ga.__args__ == (int, )
 
 
 class AppTestWithoutStrategies:
@@ -1858,7 +1757,7 @@ class AppTestListFastSubscr:
     def test_getitem(self):
         import operator
         l = [0, 1, 2, 3, 4]
-        for i in xrange(5):
+        for i in range(5):
             assert l[i] == i
         assert l[3:] == [3, 4]
         raises(TypeError, operator.getitem, l, "str")

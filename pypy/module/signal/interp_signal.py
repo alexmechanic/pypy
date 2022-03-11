@@ -6,14 +6,14 @@ import os
 import errno
 
 from pypy.interpreter.error import (
-    OperationError, exception_from_saved_errno, oefmt)
+    OperationError, exception_from_saved_errno, oefmt, wrap_oserror)
 from pypy.interpreter.executioncontext import (AsyncAction, AbstractActionFlag,
     PeriodicAsyncAction)
 from pypy.interpreter.gateway import unwrap_spec
 
-from rpython.rlib import jit, rposix, rgc
+from rpython.rlib import jit, rgc, rposix, rposix_stat
 from rpython.rlib.objectmodel import we_are_translated
-from rpython.rlib.rarithmetic import intmask
+from rpython.rlib.rarithmetic import intmask, widen
 from rpython.rlib.rsignal import *
 from rpython.rtyper.lltypesystem import lltype, rffi
 
@@ -242,9 +242,9 @@ def signal(space, signum, w_handler):
 
 
 @jit.dont_look_inside
-@unwrap_spec(fd=int)
-def set_wakeup_fd(space, fd):
-    """Sets the fd to be written to (with '\0') when a signal
+@unwrap_spec(fd="c_int", warn_on_full_buffer=bool)
+def set_wakeup_fd(space, fd, __kwonly__, warn_on_full_buffer=True):
+    """Sets the fd to be written to (with the signal number) when a signal
     comes in.  Returns the old fd.  A library can use this to
     wakeup select or poll.  The previous fd is returned.
 
@@ -254,15 +254,42 @@ def set_wakeup_fd(space, fd):
         raise oefmt(space.w_ValueError,
                     "set_wakeup_fd only works in main thread or with "
                     "__pypy__.thread.enable_signals()")
-    if fd != -1:
-        try:
-            os.fstat(fd)
-        except OSError as e:
-            if e.errno == errno.EBADF:
-                raise oefmt(space.w_ValueError, "invalid fd")
-    old_fd = pypysig_set_wakeup_fd(fd, True)
-    return space.newint(intmask(old_fd))
 
+    send_flags = 0
+    if fd != -1:
+        if WIN32:
+            from rpython.rlib._rsocket_rffi import SOL_SOCKET, SO_TYPE
+            from rpython.rlib.rsocket import getsockopt_int, SocketError
+            # it could be a socket fd or a file fd
+            try:
+                type = getsockopt_int(fd, SOL_SOCKET, SO_TYPE)
+                is_socket = True
+            except SocketError as e:
+                is_socket = False
+            if is_socket:
+                send_flags |= PYPYSIG_USE_SEND
+            else:
+                try:
+                    os.fstat(fd)
+                except OSError as e:
+                    if e.errno == errno.EBADF:
+                        raise oefmt(space.w_ValueError, "invalid fd")
+        else:
+            try:
+                os.fstat(fd)
+                flags = rposix.get_status_flags(fd)
+            except OSError as e:
+                if e.errno == errno.EBADF:
+                    raise oefmt(space.w_ValueError, "invalid fd")
+                raise wrap_oserror(space, e, eintr_retry=False)
+            if flags & rposix.O_NONBLOCK == 0:
+                raise oefmt(space.w_ValueError,
+                            "the fd %d must be in non-blocking mode", fd)
+
+    if not warn_on_full_buffer:
+        send_flags |= PYPYSIG_NO_WARN_FULL
+    old_fd = pypysig_set_wakeup_fd(fd, send_flags)
+    return space.newint(intmask(old_fd))
 
 @jit.dont_look_inside
 @unwrap_spec(signum=int, flag=int)
@@ -275,8 +302,7 @@ def siginterrupt(space, signum, flag):
     """
     check_signum_in_range(space, signum)
     if rffi.cast(lltype.Signed, c_siginterrupt(signum, flag)) < 0:
-        errno = rposix.get_saved_errno()
-        raise OperationError(space.w_RuntimeError, space.newint(errno))
+        raise exception_from_saved_errno(space, space.w_OSError)
 
 
 #__________________________________________________________
@@ -350,3 +376,132 @@ def getitimer(space, which):
         c_getitimer(which, old)
 
         return itimer_retval(space, old[0])
+
+
+@unwrap_spec(tid=int, signum=int)
+def pthread_kill(space, tid, signum):
+    "Send a signal to a thread."
+    ret = c_pthread_kill(tid, signum)
+    if widen(ret) < 0:
+        raise exception_from_saved_errno(space, space.w_OSError)
+    # the signal may have been send to the current thread
+    space.getexecutioncontext().checksignals()
+
+
+class SignalMask(object):
+    def __init__(self, space, w_signals):
+        self.space = space
+        self.w_signals = w_signals
+
+    def __enter__(self):
+        space = self.space
+        self.mask = lltype.malloc(c_sigset_t.TO, flavor='raw')
+        c_sigemptyset(self.mask)
+        for w_signum in space.unpackiterable(self.w_signals):
+            signum = space.int_w(w_signum)
+            check_signum_in_range(space, signum)
+            # bpo-33329: ignore c_sigaddset() return value as it can fail
+            # for some reserved signals, but we want the `range(1, NSIG)`
+            # idiom to allow selecting all valid signals.
+            c_sigaddset(self.mask, signum)
+        return self.mask
+
+    def __exit__(self, *args):
+        lltype.free(self.mask, flavor='raw')
+
+def _sigset_to_signals(space, mask):
+    signals_w = []
+    for sig in range(1, NSIG):
+        if c_sigismember(mask, sig) != 1:
+            continue
+        # Handle the case where it is a member by adding the signal to
+        # the result list.  Ignore the other cases because they mean
+        # the signal isn't a member of the mask or the signal was
+        # invalid, and an invalid signal must have been our fault in
+        # constructing the loop boundaries.
+        signals_w.append(space.newint(sig))
+    return space.call_function(space.w_set, space.newtuple(signals_w))
+
+def sigwait(space, w_signals):
+    """Suspend execution of the calling thread until the delivery of one of the
+    signals specified in the signal set signals. """
+    with SignalMask(space, w_signals) as sigset:
+        with lltype.scoped_alloc(rffi.INTP.TO, 1) as signum_ptr:
+            ret = c_sigwait(sigset, signum_ptr)
+            if ret != 0:
+                raise exception_from_saved_errno(space, space.w_OSError)
+            signum = signum_ptr[0]
+    return space.newint(signum)
+
+def sigpending(space):
+    """Examine pending signals.
+
+    Returns a set of signal numbers that are pending for delivery to
+    the calling thread.
+    """
+    with lltype.scoped_alloc(c_sigset_t.TO) as mask:
+        ret = c_sigpending(mask)
+        if ret != 0:
+            raise exception_from_saved_errno(space, space.w_OSError)
+        return _sigset_to_signals(space, mask)
+
+@unwrap_spec(how=int)
+def pthread_sigmask(space, how, w_signals):
+    'Fetch and/or change the signal mask of the calling thread.'
+    with SignalMask(space, w_signals) as sigset:
+        with lltype.scoped_alloc(c_sigset_t.TO) as previous:
+            ret = c_pthread_sigmask(how, sigset, previous)
+            if ret != 0:
+                raise exception_from_saved_errno(space, space.w_OSError)
+            # if signals was unblocked, signal handlers have been called
+            space.getexecutioncontext().checksignals()
+            return _sigset_to_signals(space, previous)
+
+def valid_signals(space):
+    '''Return a set of valid signal numbers on this platform.
+
+    The signal numbers returned by this function can be safely passed to
+    functions like `pthread_sigmask`.'''
+    if WIN32:
+        # follow cpython
+        signals_w = [space.newint(SIGABRT), space.newint(SIGBREAK),
+                     space.newint(SIGFPE), space.newint(SIGILL),
+                     space.newint(SIGINT), space.newint(SIGSEGV),
+                     space.newint(SIGTERM),
+                    ]
+        return space.call_function(space.w_set, space.newtuple(signals_w))
+    else:     
+        mask = lltype.malloc(c_sigset_t.TO, flavor='raw')
+        try:
+            ret = c_sigemptyset(mask)
+            if ret != 0:
+                raise exception_from_saved_errno(space, space.w_OSError)
+            ret = c_sigfillset(mask)
+            if ret != 0:
+                raise exception_from_saved_errno(space, space.w_OSError)
+            return _sigset_to_signals(space, mask)
+        finally:
+            lltype.free(mask, flavor='raw')
+
+@unwrap_spec(signalnum=int)
+def raise_signal(space, signalnum):
+    'Send a signal to the executing process.'
+    with rposix.SuppressIPH():
+        err = c_raise(signalnum)
+    if err != 0:
+        raise exception_from_saved_errno(space, space.w_OSError)
+
+@unwrap_spec(signalnum=int)
+def strsignal(space, signalnum):
+    '''Return the system description of the given signal.
+    The return values can be such as "Interrupt", "Segmentation fault", etc.
+    Returns None if the signal is not recognized.'''
+    from rpython.rlib import rsignal
+    if signalnum < 1 or signalnum > NSIG:
+        raise oefmt(space.w_ValueError, 'signal number out of range')
+    res = rsignal.strsignal(signalnum)
+    if res is None:
+        return space.w_None
+    return space.newtext(res)
+
+

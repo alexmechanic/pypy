@@ -1,9 +1,11 @@
 import pytest
 
 from rpython.rtyper.lltypesystem import rffi
+from rpython.rlib.buffer import StringBuffer
+
 from pypy.module.cpyext.test.test_api import BaseApiTest
 from pypy.module.cpyext.test.test_cpyext import AppTestCpythonExtensionBase
-from rpython.rlib.buffer import StringBuffer
+from pypy.interpreter.buffer import SimpleView
 from pypy.module.cpyext.pyobject import make_ref, from_ref, decref
 from pypy.module.cpyext.memoryobject import PyMemoryViewObject
 
@@ -11,8 +13,8 @@ only_pypy ="config.option.runappdirect and '__pypy__' not in sys.builtin_module_
 
 class TestMemoryViewObject(BaseApiTest):
     def test_frombuffer(self, space, api):
-        w_buf = space.newbuffer(StringBuffer("hello"))
-        w_memoryview = api.PyMemoryView_FromObject(w_buf)
+        w_view = SimpleView(StringBuffer("hello"), w_obj=self).wrap(space)
+        w_memoryview = api.PyMemoryView_FromObject(w_view)
         c_memoryview = rffi.cast(
             PyMemoryViewObject, make_ref(space, w_memoryview))
         view = c_memoryview.c_view
@@ -47,8 +49,7 @@ class TestMemoryViewObject(BaseApiTest):
         py_obj = make_ref(space, w_obj)
         assert py_obj.c_ob_type.c_tp_as_buffer
         assert py_obj.c_ob_type.c_tp_as_buffer.c_bf_getbuffer
-        assert py_obj.c_ob_type.c_tp_as_buffer.c_bf_getreadbuffer
-        assert py_obj.c_ob_type.c_tp_as_buffer.c_bf_getwritebuffer
+        assert not py_obj.c_ob_type.c_tp_as_buffer.c_bf_releasebuffer
          
 
 class AppTestPyBuffer_FillInfo(AppTestCpythonExtensionBase):
@@ -70,7 +71,7 @@ class AppTestPyBuffer_FillInfo(AppTestCpythonExtensionBase):
                  Py_DECREF(str);
 
                  ret = PyMemoryView_FromBuffer(&buf);
-                 if (((PyMemoryViewObject*)ret)->view.obj != buf.obj)
+                 if (((PyMemoryViewObject*)ret)->view.obj != NULL)
                  {
                     PyErr_SetString(PyExc_ValueError, "leaked ref");
                     Py_DECREF(ret);
@@ -80,6 +81,29 @@ class AppTestPyBuffer_FillInfo(AppTestCpythonExtensionBase):
                  """)])
         result = module.fillinfo()
         assert b"hello, world." == result
+
+    @pytest.mark.skip(reason="segfaults on linux buildslave")
+    def test_0d(self):
+        module = self.import_extension('foo', [
+            ("create_view", "METH_VARARGS",
+             """
+             /* Create an approximation of the buffer for a 0d ndarray */
+             Py_buffer buf;
+             PyObject *ret, *str = PyBytes_FromString("hello, world.");
+             buf.buf = PyBytes_AsString(str);
+             buf.obj = str;
+             buf.readonly = 1;
+             buf.len = 13;
+             buf.itemsize = 13;
+             buf.ndim = 0;
+             buf.shape = NULL;
+             ret = PyMemoryView_FromBuffer(&buf);
+             return ret;
+            """)])
+        result = module.create_view()
+        assert result.shape == ()
+        assert result.itemsize == 13
+        assert result.tobytes() == b'hello, world.'
 
 class AppTestBufferProtocol(AppTestCpythonExtensionBase):
     def test_fromobject(self):
@@ -96,7 +120,6 @@ class AppTestBufferProtocol(AppTestCpythonExtensionBase):
         assert mview.tobytes() == hello
 
     def test_buffer_protocol_app(self):
-        import struct
         module = self.import_module(name='buffer_test')
         arr = module.PyMyArray(10)
         y = memoryview(arr)
@@ -104,8 +127,7 @@ class AppTestBufferProtocol(AppTestCpythonExtensionBase):
         assert y.shape == (10,)
         assert len(y) == 10
         s = y[3]
-        assert len(s) == struct.calcsize('i')
-        assert s == struct.pack('i', 3)
+        assert s == 3
 
     def test_buffer_protocol_capi(self):
         foo = self.import_extension('foo', [
@@ -182,7 +204,7 @@ class AppTestBufferProtocol(AppTestCpythonExtensionBase):
         arr = module.PyMyArray(10)
         ten = foo.get_len(arr)
         assert ten == 10
-        ten = foo.get_len('1234567890')
+        ten = foo.get_len(b'1234567890')
         assert ten == 10
         ten = foo.test_buffer(arr)
         assert ten == 10
@@ -249,9 +271,9 @@ class AppTestBufferProtocol(AppTestCpythonExtensionBase):
 
                 type->ht_type.tp_name = "Test";
                 type->ht_type.tp_basicsize = sizeof(PyObject);
-                type->ht_name = PyString_FromString("Test");
+                type->ht_name = PyUnicode_FromString("Test");
                 type->ht_type.tp_flags |= Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE |
-                                          Py_TPFLAGS_HEAPTYPE | Py_TPFLAGS_HAVE_NEWBUFFER;
+                                          Py_TPFLAGS_HEAPTYPE;
                 type->ht_type.tp_flags &= ~Py_TPFLAGS_HAVE_GC;
 
                 type->ht_type.tp_dealloc = dealloc;
@@ -271,40 +293,21 @@ class AppTestBufferProtocol(AppTestCpythonExtensionBase):
         assert module.get_cnt() == 0
         assert module.get_dealloc_cnt() == 1
 
-class AppTestBufferInfo(AppTestCpythonExtensionBase):
-    spaceconfig = AppTestCpythonExtensionBase.spaceconfig.copy()
-    spaceconfig['usemodules'].append('micronumpy')
+    def test_FromMemory(self):
+        module = self.import_extension('foo', [
+            ('new', 'METH_NOARGS', """
+             static char s[5] = "hello";
+             return PyMemoryView_FromMemory(s, 4, PyBUF_READ);
+             """)])
+        mv = module.new()
+        assert mv.tobytes() == b'hell'
 
-    @pytest.mark.skipif(only_pypy, reason='pypy only test')
-    def test_buffer_info(self):
-        try:
-            from _numpypy import multiarray as np
-        except ImportError:
-            skip('pypy built without _numpypy')
-        module = self.import_module(name='buffer_test')
-        get_buffer_info = module.get_buffer_info
-        raises(ValueError, get_buffer_info, np.arange(5)[::2], ('SIMPLE',))
-        arr = np.zeros((1, 10), order='F')
-        shape, strides = get_buffer_info(arr, ['F_CONTIGUOUS'])
-        assert strides[0] == 8
-        arr = np.zeros((10, 1), order='C')
-        shape, strides = get_buffer_info(arr, ['C_CONTIGUOUS'])
-        assert strides[-1] == 8
-        dt1 = np.dtype(
-             [('a', 'b'), ('b', 'i'),
-              ('sub0', np.dtype('b,i')),
-              ('sub1', np.dtype('b,i')),
-              ('sub2', np.dtype('b,i')),
-              ('sub3', np.dtype('b,i')),
-              ('sub4', np.dtype('b,i')),
-              ('sub5', np.dtype('b,i')),
-              ('sub6', np.dtype('b,i')),
-              ('sub7', np.dtype('b,i')),
-              ('c', 'i')],
-             )
-        x = np.arange(dt1.itemsize, dtype='int8').view(dt1)
-        # calling get_buffer_info on x creates a memory leak,
-        # which is detected as an error at test teardown:
-        # Exception TypeError: "'NoneType' object is not callable"
-        #         in <bound method ConcreteArray.__del__ ...> ignored
-
+    def test_FromBuffer_NULL(self):
+        module = self.import_extension('foo', [
+            ('new', 'METH_NOARGS', """
+            Py_buffer info;
+            if (PyBuffer_FillInfo(&info, NULL, NULL, 1, 1, PyBUF_FULL_RO) < 0)
+                return NULL;
+            return PyMemoryView_FromBuffer(&info);
+             """)])
+        raises(ValueError, module.new)

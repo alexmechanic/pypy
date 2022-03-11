@@ -9,10 +9,11 @@ from pypy.interpreter.gateway import (
 from pypy.interpreter.typedef import TypeDef
 from pypy.objspace.std.sliceobject import (W_SliceObject, unwrap_start_stop,
     normalize_simple_slice)
-from pypy.objspace.std.util import negate, IDTAG_SPECIAL, IDTAG_SHIFT
+from pypy.objspace.std.util import negate, IDTAG_SPECIAL, IDTAG_SHIFT, \
+    generic_alias_class_getitem
 from rpython.rlib import jit
 from rpython.rlib.debug import make_sure_not_resized
-from rpython.rlib.rarithmetic import intmask
+from rpython.rlib.rarithmetic import intmask, r_ulonglong, r_uint
 
 
 UNROLL_CUTOFF = 10
@@ -96,7 +97,7 @@ class W_AbstractTupleObject(W_Root):
         return iterobject.W_FastTupleIterObject(self, self.tolist())
 
     @staticmethod
-    def descr_new(space, w_tupletype, w_sequence=None):
+    def descr_new(space, w_tupletype, w_sequence=None, __posonly__=None):
         if w_sequence is None:
             tuple_w = []
         elif (space.is_w(w_tupletype, space.w_tuple) and
@@ -111,9 +112,11 @@ class W_AbstractTupleObject(W_Root):
     def descr_repr(self, space):
         items = self.tolist()
         if len(items) == 1:
-            return space.newtext("(" + space.text_w(space.repr(items[0])) + ",)")
-        tmp = ", ".join([space.text_w(space.repr(item)) for item in items])
-        return space.newtext("(" + tmp + ")")
+            return space.newtext(
+                b"(" + space.utf8_w(space.repr(items[0])) + b",)")
+        tmp = b", ".join([space.utf8_w(space.repr(item))
+                          for item in items])
+        return space.newtext(b"(" + tmp + b")")
 
     def descr_hash(self, space):
         raise NotImplementedError
@@ -200,24 +203,30 @@ class W_AbstractTupleObject(W_Root):
     def descr_getitem(self, space, w_index):
         if isinstance(w_index, W_SliceObject):
             return self._getslice(space, w_index)
-        index = space.getindex_w(w_index, space.w_IndexError, "tuple index")
+        index = space.getindex_w(w_index, space.w_IndexError, "tuple")
         return self.getitem(space, index)
 
     def _getslice(self, space, w_index):
         items = self.tolist()
         length = len(items)
         start, stop, step, slicelength = w_index.indices4(space, length)
+        if slicelength == 0:
+            subitems = []
+        elif step == 1:
+            assert 0 <= start <= stop
+            subitems = items[start:stop]
+        else:
+            subitems = self._getslice_advanced(items, start, step, slicelength)
+        return space.newtuple(subitems)
+
+    @staticmethod
+    def _getslice_advanced(items, start, step, slicelength):
         assert slicelength >= 0
         subitems = [None] * slicelength
         for i in range(slicelength):
             subitems[i] = items[start]
             start += step
-        return space.newtuple(subitems)
-
-    def descr_getslice(self, space, w_start, w_stop):
-        length = self.length()
-        start, stop = normalize_simple_slice(space, length, w_start, w_stop)
-        return space.newtuple(self.tolist()[start:stop])
+        return subitems
 
     def descr_getnewargs(self, space):
         return space.newtuple([space.newtuple(self.tolist())])
@@ -271,14 +280,28 @@ If the argument is a tuple, the return value is the same object.""",
     __rmul__ = interp2app(W_AbstractTupleObject.descr_mul),
 
     __getitem__ = interp2app(W_AbstractTupleObject.descr_getitem),
-    __getslice__ = interp2app(W_AbstractTupleObject.descr_getslice),
 
     __getnewargs__ = interp2app(W_AbstractTupleObject.descr_getnewargs),
+    __class_getitem__ = interp2app(
+        generic_alias_class_getitem, as_classmethod=True),
+
     count = interp2app(W_AbstractTupleObject.descr_count),
     index = interp2app(W_AbstractTupleObject.descr_index)
 )
 W_AbstractTupleObject.typedef.flag_sequence_bug_compat = True
 
+if sys.maxint == 2 ** 31 - 1:
+    XXPRIME_1 = r_uint(2654435761)
+    XXPRIME_2 = r_uint(2246822519)
+    XXPRIME_5 = r_uint(374761393)
+    xxrotate = lambda x: ((x << 13) | (x >> 19)) # rotate left 13 bits
+    uhash_type = r_uint
+else:
+    XXPRIME_1 = r_ulonglong(11400714785074694791)
+    XXPRIME_2 = r_ulonglong(14029467366897019727)
+    XXPRIME_5 = r_ulonglong(2870177450012600261)
+    xxrotate = lambda x: ((x << 31) | (x >> 33)) # Rotate left 31 bits
+    uhash_type = r_ulonglong
 
 class W_TupleObject(W_AbstractTupleObject):
     _immutable_fields_ = ['wrappeditems[*]']
@@ -298,41 +321,54 @@ class W_TupleObject(W_AbstractTupleObject):
 
     def descr_hash(self, space):
         if _unroll_condition(self):
-            res = self._descr_hash_unroll(space)
+            acc = self._descr_hash_unroll(space)
         else:
-            res = self._descr_hash_jitdriver(space)
-        return space.newint(res)
+            acc = self._descr_hash_jitdriver(space)
+
+        # Add input length, mangled to keep the historical value of hash(())
+        acc += len(self.wrappeditems) ^ (XXPRIME_5 ^ uhash_type(3527539))
+        acc += (acc == uhash_type(-1)) * uhash_type(1546275796 + 1)
+        return space.newint(intmask(acc))
 
     @jit.unroll_safe
     def _descr_hash_unroll(self, space):
-        mult = 1000003
-        x = 0x345678
-        z = len(self.wrappeditems)
+        # Hash for tuples. This is a slightly simplified version of the xxHash
+        # non-cryptographic hash:
+        # - we do not use any parallellism, there is only 1 accumulator.
+        # - we drop the final mixing since this is just a permutation of the
+        #   output space: it does not help against collisions.
+        # - at the end, we mangle the length with a single constant.
+        # For the xxHash specification, see
+        # https://github.com/Cyan4973/xxHash/blob/master/doc/xxhash_spec.md
+
+        # Below are the official constants from the xxHash specification. Optimizing
+        # compilers should emit a single "rotate" instruction for the
+        # _PyHASH_XXROTATE() expansion. If that doesn't happen for some important
+        # platform, the macro could be changed to expand to a platform-specific rotate
+        # spelling instead.
+        acc = XXPRIME_5
         for w_item in self.wrappeditems:
-            y = space.hash_w(w_item)
-            x = (x ^ y) * mult
-            z -= 1
-            mult += 82520 + z + z
-        x += 97531
-        return intmask(x)
+            lane = uhash_type(space.hash_w(w_item))
+            acc += lane * XXPRIME_2
+            acc = xxrotate(acc)
+            acc *= XXPRIME_1
+        return acc
 
     def _descr_hash_jitdriver(self, space):
-        mult = 1000003
-        x = 0x345678
-        z = len(self.wrappeditems)
+        # see comments above
+        acc = XXPRIME_5
         w_type = space.type(self.wrappeditems[0])
         wrappeditems = self.wrappeditems
         i = 0
         while i < len(wrappeditems):
             hash_driver.jit_merge_point(w_type=w_type)
             w_item = wrappeditems[i]
-            y = space.hash_w(w_item)
-            x = (x ^ y) * mult
-            z -= 1
-            mult += 82520 + z + z
+            lane = uhash_type(space.hash_w(w_item))
+            acc += lane * XXPRIME_2
+            acc = xxrotate(acc)
+            acc *= XXPRIME_1
             i += 1
-        x += 97531
-        return intmask(x)
+        return acc
 
     def descr_eq(self, space, w_other):
         if not isinstance(w_other, W_AbstractTupleObject):

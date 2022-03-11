@@ -9,10 +9,12 @@ from pypy.interpreter.error import OperationError
 from pypy.tool.ann_override import PyPyAnnotatorPolicy
 from rpython.config.config import to_optparse, make_dict, SUPPRESS_USAGE
 from rpython.config.config import ConflictConfigError
+from rpython.rlib import rlocale
 from pypy.tool.option import make_objspace
 from pypy import pypydir
 from rpython.rlib import rthread
 from pypy.module.thread import os_thread
+from pypy.module.sys.version import CPYTHON_VERSION
 
 thisdir = py.path.local(__file__).dirpath()
 
@@ -66,14 +68,18 @@ def create_entry_point(space, w_dict):
         try:
             try:
                 space.startup()
-                w_executable = space.newtext(argv[0])
-                w_argv = space.newlist([space.newtext(s) for s in argv[1:]])
-                w_exitcode = space.call_function(w_entry_point, w_executable, w_argv)
+                if rlocale.HAVE_LANGINFO:
+                    try:
+                        rlocale.setlocale(rlocale.LC_CTYPE, '')
+                    except rlocale.LocaleError:
+                        pass
+                w_executable = space.newfilename(argv[0])
+                w_argv = space.newlist([space.newfilename(s)
+                                        for s in argv[1:]])
+                w_bargv = space.newlist([space.newbytes(s)
+                                        for s in argv[1:]])
+                w_exitcode = space.call_function(w_entry_point, w_executable, w_bargv, w_argv)
                 exitcode = space.int_w(w_exitcode)
-                # try to pull it all in
-            ##    from pypy.interpreter import main, interactive, error
-            ##    con = interactive.PyPyConsole(space)
-            ##    con.interact()
             except OperationError as e:
                 debug("OperationError:")
                 debug(" operror-type: " + e.w_type.getname(space))
@@ -81,7 +87,11 @@ def create_entry_point(space, w_dict):
                 return 1
         finally:
             try:
-                space.finish()
+                # the equivalent of Py_FinalizeEx
+                if space.finish() < 0:
+                    # Value unlikely to be confused with a non-error exit status
+                    # or other special meaning (from cpython/Modules/main.c)
+                    exitcode = 120
             except OperationError as e:
                 debug("OperationError:")
                 debug(" operror-type: " + e.w_type.getname(space))
@@ -124,19 +134,28 @@ def get_additional_entrypoints(space, w_initstdio):
         try:
             # initialize sys.{path,executable,stdin,stdout,stderr}
             # (in unbuffered mode, to avoid troubles) and import site
-            space.appexec([w_path, space.newtext(home), w_initstdio],
+            space.appexec([w_path, space.newfilename(home), w_initstdio],
             r"""(path, home, initstdio):
-                import sys
+                import sys 
                 # don't import anything more above this: sys.path is not set
                 sys.path[:] = path
                 sys.executable = home
                 initstdio(unbuffered=True)
+                import os   # don't move it to the first line of this function!
+                _MACOSX = sys.platform == 'darwin'
+                if _MACOSX:
+                    # __PYVENV_LAUNCHER__, used by CPython on macOS, should be ignored
+                    # since it (possibly) results in a wrong sys.prefix and
+                    # sys.exec_prefix (and consequently sys.path).
+                    old_pyvenv_launcher = os.environ.pop('__PYVENV_LAUNCHER__', None)
                 try:
                     import site
                 except Exception as e:
                     sys.stderr.write("'import site' failed:\n")
                     import traceback
                     traceback.print_exc()
+                if _MACOSX and old_pyvenv_launcher:
+                    os.environ['__PYVENV_LAUNCHER__'] = old_pyvenv_launcher
             """)
             return rffi.cast(rffi.INT, 0)
         except OperationError as e:
@@ -183,7 +202,7 @@ def get_additional_entrypoints(space, w_initstdio):
         try:
             w_globals = space.newdict(module=True)
             space.setitem(w_globals, space.newtext('__builtins__'),
-                          space.builtin_modules['__builtin__'])
+                          space.builtin_modules['builtins'])
             space.setitem(w_globals, space.newtext('c_argument'),
                           space.newint(c_argument))
             space.appexec([space.newtext(source), w_globals], """(src, glob):
@@ -192,7 +211,7 @@ def get_additional_entrypoints(space, w_initstdio):
                 if not hasattr(sys, '_pypy_execute_source'):
                     sys._pypy_execute_source = []
                 sys._pypy_execute_source.append(glob)
-                exec stmt in glob
+                exec(stmt, glob)
             """)
         except OperationError as e:
             debug("OperationError:")
@@ -230,6 +249,12 @@ class PyPyTarget(object):
             raise Exception("You have to specify the --opt level.\n"
                     "Try --opt=2 or --opt=jit, or equivalently -O2 or -Ojit .")
         self.translateconfig = translateconfig
+
+        # change the default for this option
+        # XXX disabled until we fix the real problem: a per-translation
+        # seed for siphash is bad
+        #config.translation.suggest(hash="siphash24")
+
         # set up the objspace optimizations based on the --opt argument
         from pypy.config.pypyoption import set_pypy_opt_level
         set_pypy_opt_level(config, translateconfig.opt)
@@ -242,7 +267,7 @@ class PyPyTarget(object):
         return pypy_optiondescription
 
     def target(self, driver, args):
-        driver.exe_name = 'pypy-%(backend)s'
+        driver.exe_name = 'pypy%d.%d-%%(backend)s' % CPYTHON_VERSION[:2]
 
         config = driver.config
         parser = self.opt_parser(config)
@@ -279,7 +304,8 @@ class PyPyTarget(object):
         if sys.platform == 'win32':
             libdir = thisdir.join('..', '..', 'libs')
             libdir.ensure(dir=1)
-            config.translation.libname = str(libdir.join('python27.lib'))
+            pythonlib = "python{0[0]}{0[1]}.lib".format(CPYTHON_VERSION)
+            config.translation.libname = str(libdir.join(pythonlib))
 
         if config.translation.thread:
             config.objspace.usemodules.thread = True
@@ -317,7 +343,6 @@ class PyPyTarget(object):
             assert 0, ("--sandbox is not tested nor maintained.  If you "
                        "really want to try it anyway, remove this line in "
                        "pypy/goal/targetpypystandalone.py.")
-            config.objspace.lonepycfiles = False
 
         if config.objspace.usemodules.cpyext:
             if config.translation.gc not in ('incminimark', 'boehm'):
@@ -346,8 +371,9 @@ class PyPyTarget(object):
 
     def hack_for_cffi_modules(self, driver):
         # HACKHACKHACK
-        # ugly hack to modify target goal from compile_* to build_cffi_imports
-        # this should probably get cleaned up and merged with driver.create_exe
+        # ugly hack to modify target goal from compile_* to build_cffi_imports,
+        # as done in package.py
+        # this is needed by the benchmark buildbot run, maybe do it as a seperate step there?
         from rpython.tool.runsubprocess import run_subprocess
         from rpython.translator.driver import taskdef
         import types
@@ -366,7 +392,6 @@ class PyPyTarget(object):
             status, out, err = run_subprocess(str(exe_name), argv)
             sys.stdout.write(out)
             sys.stderr.write(err)
-            # otherwise, ignore errors
         driver.task_build_cffi_imports = types.MethodType(task_build_cffi_imports, driver)
         driver.tasks['build_cffi_imports'] = driver.task_build_cffi_imports, [compile_goal]
         driver.default_goal = 'build_cffi_imports'

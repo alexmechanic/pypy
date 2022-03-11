@@ -1,14 +1,15 @@
 from __future__ import absolute_import
 import sys
+import pytest
 
 import os
 if os.name != 'posix':
-    skip('resource.h only available on unix')
+    pytest.skip('resource.h only available on unix')
 
 try:
     from lib_pypy import resource
-except ImportError as e:
-    skip(str(e))
+except (ImportError, SyntaxError) as e:
+    pytest.skip(str(e))
 
 
 def test_getrusage():
@@ -34,15 +35,15 @@ def test_getrusage():
         if i < 2:
             expected_type = float
         else:
-            expected_type = (int, long)
+            expected_type = int
         assert isinstance(x[i], expected_type)
 
 def test_getrlimit():
     x = resource.getrlimit(resource.RLIMIT_CPU)
     assert isinstance(x, tuple)
     assert len(x) == 2
-    assert isinstance(x[0], (int, long))
-    assert isinstance(x[1], (int, long))
+    assert isinstance(x[0], int)
+    assert isinstance(x[1], int)
 
 def test_setrlimit():
     # minimal "does not crash" test
@@ -54,3 +55,25 @@ def test_setrlimit():
     yf = y + (0.3 if y >= 0 else -0.3)
     if int(xf) == x and int(yf) == y:
         resource.setrlimit(resource.RLIMIT_CPU, (x, y))  # truncated to ints
+
+if sys.platform.startswith("linux") and hasattr(resource, 'prlimit'):
+    def test_prlimit():
+        old_limits = resource.getrlimit(resource.RLIMIT_STACK)
+        assert resource.prlimit(0, resource.RLIMIT_STACK) == old_limits
+        assert resource.prlimit(os.getpid(), resource.RLIMIT_STACK) == old_limits
+
+        # Unchanged
+        assert resource.getrlimit(resource.RLIMIT_STACK) == old_limits
+
+        # Raise the soft limit to match the hard limit
+        new_limits = (old_limits[1], old_limits[1])
+        assert resource.prlimit(os.getpid(), resource.RLIMIT_STACK, new_limits) == old_limits
+        # And make sure it was raised
+        assert resource.prlimit(0, resource.RLIMIT_STACK, new_limits) == new_limits
+        assert resource.getrlimit(resource.RLIMIT_STACK) == new_limits
+
+        # Change it back
+        assert resource.prlimit(0, resource.RLIMIT_STACK, old_limits) == new_limits
+        # And make sure it was changed back
+        assert resource.prlimit(os.getpid(), resource.RLIMIT_STACK, old_limits) == old_limits
+        assert resource.getrlimit(resource.RLIMIT_STACK) == old_limits

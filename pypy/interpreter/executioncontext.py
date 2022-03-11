@@ -23,17 +23,27 @@ class ExecutionContext(object):
     # XXX [fijal] but they're not. is_being_profiled is guarded a bit all
     #     over the place as well as w_tracefunc
 
-    _immutable_fields_ = ['profilefunc?', 'w_tracefunc?']
+    _immutable_fields_ = [
+        'profilefunc?', 'w_tracefunc?',
+        'w_asyncgen_firstiter_fn?', 'w_asyncgen_finalizer_fn?']
 
     def __init__(self, space):
         self.space = space
         self.topframeref = jit.vref_None
+        # this is exposed to app-level as 'sys.exc_info()'.  At any point in
+        # time it is the exception caught by the topmost 'except ... as e:'
+        # app-level block.
+        self.sys_exc_operror = None
         self.w_tracefunc = None
         self.is_tracing = 0
         self.compiler = space.createcompiler()
         self.profilefunc = None
         self.w_profilefuncarg = None
         self.thread_disappeared = False   # might be set to True after os.fork()
+        self.w_asyncgen_firstiter_fn = None
+        self.w_asyncgen_finalizer_fn = None
+        self.contextvar_context = None
+        self.coroutine_origin_tracking_depth = 0
 
     @staticmethod
     def _mark_thread_disappeared(space):
@@ -168,11 +178,8 @@ class ExecutionContext(object):
     def run_trace_func(self, frame):
         code = frame.pycode
         d = frame.getorcreatedebug()
-        if d.instr_lb <= frame.last_instr < d.instr_ub:
-            if frame.last_instr < d.instr_prev_plus_one:
-                # We jumped backwards in the same line.
-                self._trace(frame, 'line', self.space.w_None)
-        else:
+        line = d.f_lineno
+        if not (d.instr_lb <= frame.last_instr < d.instr_ub):
             size = len(code.co_lnotab) / 2
             addr = 0
             line = code.co_firstlineno
@@ -185,8 +192,10 @@ class ExecutionContext(object):
                 addr += c
                 if c:
                     d.instr_lb = addr
-
-                line += ord(lineno[p + 1])
+                line_offset = ord(lineno[p + 1])
+                if line_offset >= 0x80:
+                    line_offset -= 0x100
+                line += line_offset
                 p += 2
                 size -= 1
 
@@ -203,9 +212,14 @@ class ExecutionContext(object):
             else:
                 d.instr_ub = sys.maxint
 
-            if d.instr_lb == frame.last_instr: # At start of line!
-                d.f_lineno = line
+        # when we are at a start of a line, or executing a backwards jump,
+        # produce a line event
+        if d.instr_lb == frame.last_instr or frame.last_instr < d.instr_prev_plus_one:
+            d.f_lineno = line
+            if d.f_trace_lines:
                 self._trace(frame, 'line', self.space.w_None)
+        if d.f_trace_opcodes:
+            self._trace(frame, 'opcode', self.space.w_None)
 
         d.instr_prev_plus_one = frame.last_instr + 1
 
@@ -226,39 +240,40 @@ class ExecutionContext(object):
             self._trace(frame, 'exception', None, operationerr)
         #operationerr.print_detailed_traceback(self.space)
 
-    @jit.dont_look_inside
-    @specialize.arg(1)
-    def sys_exc_info(self, for_hidden=False):
+    @jit.unroll_safe
+    def sys_exc_info(self):
         """Implements sys.exc_info().
         Return an OperationError instance or None.
-
-        Ignores exceptions within hidden frames unless for_hidden=True
-        is specified.
+        Returns the "top-most" exception in the stack.
 
         # NOTE: the result is not the wrapped sys.exc_info() !!!
 
         """
-        return self.gettopframe()._exc_info_unroll(self.space, for_hidden)
+        return self.sys_exc_operror
 
     def set_sys_exc_info(self, operror):
-        frame = self.gettopframe_nohidden()
-        if frame:     # else, the exception goes nowhere and is lost
-            frame.last_exception = operror
+        self.sys_exc_operror = operror
 
-    def clear_sys_exc_info(self):
-        # Find the frame out of which sys_exc_info() would return its result,
-        # and hack this frame's last_exception to become the cleared
-        # OperationError (which is different from None!).
-        frame = self.gettopframe_nohidden()
-        while frame:
-            if frame.last_exception is not None:
-                frame.last_exception = get_cleared_operation_error(self.space)
-                break
-            frame = self.getnextframe_nohidden(frame)
+    def set_sys_exc_info3(self, w_type, w_value, w_traceback):
+        from pypy.interpreter import pytraceback
+
+        space = self.space
+        if space.is_none(w_value):
+            operror = None
+        else:
+            tb = None
+            if not space.is_none(w_traceback):
+                try:
+                    tb = pytraceback.check_traceback(space, w_traceback, '?')
+                except OperationError:    # catch and ignore bogus objects
+                    pass
+            operror = OperationError(w_type, w_value, tb)
+        self.set_sys_exc_info(operror)
 
     @jit.dont_look_inside
     def settrace(self, w_func):
         """Set the global trace function."""
+        # self.space.audit("sys.settrace", [])
         if self.space.is_w(w_func, self.space.w_None):
             self.w_tracefunc = None
         else:
@@ -273,6 +288,7 @@ class ExecutionContext(object):
 
     def setprofile(self, w_func):
         """Set the global trace function."""
+        # self.space.audit("sys.setprofile", [])
         if self.space.is_w(w_func, self.space.w_None):
             self.profilefunc = None
             self.w_profilefuncarg = None
@@ -327,6 +343,7 @@ class ExecutionContext(object):
 
         if w_callback is not None and event != "leaveframe":
             if operr is not None:
+                operr.normalize_exception(space)
                 w_value = operr.get_w_value(space)
                 w_arg = space.newtuple([operr.w_type, w_value,
                                         operr.get_w_traceback(space)])
@@ -369,7 +386,6 @@ class ExecutionContext(object):
                     event == 'c_exception'):
                 return
 
-            last_exception = frame.last_exception
             if event == 'leaveframe':
                 event = 'return'
 
@@ -385,7 +401,6 @@ class ExecutionContext(object):
                     raise
 
             finally:
-                frame.last_exception = last_exception
                 self.is_tracing -= 1
 
     def checksignals(self):
@@ -639,9 +654,14 @@ class UserDelAction(AsyncAction):
             if self.gc_disabled(w_obj):
                 return
             try:
-                space.get_and_call_function(w_del, w_obj)
+                w_impl = space.get(w_del, w_obj)
             except Exception as e:
                 report_error(space, e, "method __del__ of ", w_obj)
+            else:
+                try:
+                    space.call_function(w_impl)
+                except Exception as e:
+                    report_error(space, e, '', w_del)
 
         # Call the RPython-level _finalize_() method.
         try:
@@ -665,7 +685,7 @@ def report_error(space, e, where, w_obj):
 def make_finalizer_queue(W_Root, space):
     """Make a FinalizerQueue subclass which responds to GC finalizer
     events by 'firing' the UserDelAction class above.  It does not
-    directly fetches the objects to finalize at all; they stay in the 
+    directly fetches the objects to finalize at all; they stay in the
     GC-managed queue, and will only be fetched by UserDelAction
     (between bytecodes)."""
 

@@ -498,7 +498,7 @@ def c_call_b(space, cppmeth, cppobj, nargs, cargs):
     return rffi.cast(rffi.UCHAR, space.c_uint_w(call_capi(space, 'call_b', args)))
 def c_call_c(space, cppmeth, cppobj, nargs, cargs):
     args = [_ArgM(cppmeth), _ArgO(cppobj), _ArgI(nargs), _ArgP(cargs)]
-    return rffi.cast(rffi.CHAR, space.text_w(call_capi(space, 'call_c', args))[0])
+    return rffi.cast(rffi.CHAR, space.bytes_w(call_capi(space, 'call_c', args))[0])
 def c_call_h(space, cppmeth, cppobj, nargs, cargs):
     args = [_ArgM(cppmeth), _ArgO(cppobj), _ArgI(nargs), _ArgP(cargs)]
     return rffi.cast(rffi.SHORT, space.int_w(call_capi(space, 'call_h', args)))

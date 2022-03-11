@@ -42,7 +42,7 @@ class AppTestIterator(AppTestCpythonExtensionBase):
             ),
            ("check", "METH_O",
             '''
-                return PyInt_FromLong(
+                return PyLong_FromLong(
                     PySequence_Check(args) +
                     PyMapping_Check(args) * 2);
             ''')
@@ -50,7 +50,7 @@ class AppTestIterator(AppTestCpythonExtensionBase):
             static PyObject *
             mp_subscript(PyObject *self, PyObject *key)
             {
-                return PyInt_FromLong(42);
+                return PyLong_FromLong(42);
             }
             static Py_ssize_t
             mp_length(PyObject *self)
@@ -76,10 +76,6 @@ class AppTestIterator(AppTestCpythonExtensionBase):
         e = raises(TypeError, iter, obj)
         assert str(e.value).endswith("object is not iterable")
         #
-        import operator
-        assert not operator.isSequenceType(obj)
-        assert operator.isMappingType(obj)
-        #
         assert module.check(obj) == 2
         # make sure dictionaries return false for PySequence_Check
         assert module.check({'a': 1}) == 2
@@ -96,7 +92,7 @@ class AppTestIterator(AppTestCpythonExtensionBase):
             '''),
            ("check", "METH_O",
             '''
-                return PyInt_FromLong(
+                return PyLong_FromLong(
                     PySequence_Check(args) +
                     PyMapping_Check(args) * 2);
             ''')
@@ -104,7 +100,7 @@ class AppTestIterator(AppTestCpythonExtensionBase):
             static PyObject *
             sq_item(PyObject *self, Py_ssize_t size)
             {
-                return PyInt_FromLong(42);
+                return PyLong_FromLong(42);
             }
             static Py_ssize_t
             sq_length(PyObject *self)
@@ -113,7 +109,7 @@ class AppTestIterator(AppTestCpythonExtensionBase):
             }
             static PyObject *
             sq_repeat(PyObject *self, Py_ssize_t n) {
-                return PyInt_FromLong(144);
+                return PyLong_FromLong(144);
             }
             static PyObject *
             sq_inplace_repeat(PyObject *self, Py_ssize_t n) {
@@ -140,12 +136,8 @@ class AppTestIterator(AppTestCpythonExtensionBase):
         assert len(obj) == 2
         assert not hasattr(obj, "__iter__")
         it = iter(obj)
-        assert it.next() == 42
-        assert it.next() == 42
-        #
-        import operator
-        assert operator.isSequenceType(obj)
-        assert not operator.isMappingType(obj)
+        assert next(it) == 42
+        assert next(it) == 42
         #
         assert module.check(obj) == 1
         assert obj * 3 == 144

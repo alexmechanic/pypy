@@ -12,7 +12,7 @@ class BuildersModule(MixedModule):
 
     interpleveldefs = {
         "StringBuilder": "interp_builders.W_StringBuilder",
-        "UnicodeBuilder": "interp_builders.W_UnicodeBuilder",
+        "BytesBuilder": "interp_builders.W_BytesBuilder",
     }
 
 class TimeModule(MixedModule):
@@ -55,7 +55,8 @@ class IntOpModule(MixedModule):
 class OsModule(MixedModule):
     appleveldefs = {}
     interpleveldefs = {
-        'real_getenv': 'interp_os.real_getenv'
+        'real_getenv': 'interp_os.real_getenv',
+        '_get_multiarch': 'interp_os._get_multiarch',
     }
 
 
@@ -72,7 +73,7 @@ class PyPyBufferable(MixedModule):
     interpleveldefs = {
         'bufferable': 'interp_buffer.W_Bufferable',
     }
-        
+
 
 class Module(MixedModule):
     """ PyPy specific "magic" functions. A lot of them are experimental and
@@ -83,6 +84,7 @@ class Module(MixedModule):
     interpleveldefs = {
         'attach_gdb'                : 'interp_magic.attach_gdb',
         'internal_repr'             : 'interp_magic.internal_repr',
+        'objects_in_repr'           : 'interp_magic.objects_in_repr',
         'bytebuffer'                : 'bytebuffer.bytebuffer',
         'identity_dict'             : 'interp_identitydict.W_IdentityDict',
         'debug_start'               : 'interp_debug.debug_start',
@@ -94,7 +96,6 @@ class Module(MixedModule):
         'debug_get_timestamp_unit'  : 'interp_debug.debug_get_timestamp_unit',
         'builtinify'                : 'interp_magic.builtinify',
         'hidden_applevel'           : 'interp_magic.hidden_applevel',
-        'get_hidden_tb'             : 'interp_magic.get_hidden_tb',
         'lookup_special'            : 'interp_magic.lookup_special',
         'do_what_I_mean'            : 'interp_magic.do_what_I_mean',
         '_internal_crash'           : 'interp_magic._internal_crash',
@@ -107,20 +108,28 @@ class Module(MixedModule):
         'delitem_if_value_is'       : 'interp_dict.delitem_if_value_is',
         'move_to_end'               : 'interp_dict.move_to_end',
         'strategy'                  : 'interp_magic.strategy',  # dict,set,list
-        'specialized_zip_2_lists'   : 'interp_magic.specialized_zip_2_lists',
-        'set_debug'                 : 'interp_magic.set_debug',
         'locals_to_fast'            : 'interp_magic.locals_to_fast',
         'set_code_callback'         : 'interp_magic.set_code_callback',
-        'save_module_content_for_future_reload':
-                          'interp_magic.save_module_content_for_future_reload',
         'decode_long'               : 'interp_magic.decode_long',
         '_promote'                   : 'interp_magic._promote',
+        'normalize_exc'             : 'interp_magic.normalize_exc',
+        'StdErrPrinter'             : 'interp_stderrprinter.W_StdErrPrinter',
         'side_effects_ok'           : 'interp_magic.side_effects_ok',
         'stack_almost_full'         : 'interp_magic.stack_almost_full',
+        'fsencode'                  : 'interp_magic.fsencode',
+        'fsdecode'                  : 'interp_magic.fsdecode',
         'pyos_inputhook'            : 'interp_magic.pyos_inputhook',
         'newmemoryview'             : 'interp_buffer.newmemoryview',
+        'set_exc_info'              : 'interp_magic.set_exc_info',
         'utf8content'               : 'interp_magic.utf8content',
         'list_get_physical_size'    : 'interp_magic.list_get_physical_size',
+
+        'get_contextvar_context'    : 'interp_magic.get_contextvar_context',
+        'set_contextvar_context'    : 'interp_magic.set_contextvar_context',
+
+        'write_unraisable'          : 'interp_magic.write_unraisable',
+
+        'PickleBuffer'              : 'interp_buffer.W_PickleBuffer',
     }
     if sys.platform == 'win32':
         interpleveldefs['get_console_cp'] = 'interp_magic.get_console_cp'
@@ -156,7 +165,7 @@ class Module(MixedModule):
                 raise
             else:
                 pass   # ok fine to ignore in this case
-        
+
         if self.space.config.translation.jit:
             features = detect_cpu.getcpufeatures(model)
             self.extra_interpdef('jit_backend_features',
@@ -165,3 +174,7 @@ class Module(MixedModule):
             self.extra_interpdef('revdb_stop', 'interp_magic.revdb_stop')
         else:
             self.extra_interpdef('revdb_stop', 'space.w_None')
+
+        if not self.space.config.translating:
+            self.extra_interpdef(
+                '_testing_clear_audithooks', 'interp_magic._testing_clear_audithooks')

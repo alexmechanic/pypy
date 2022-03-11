@@ -21,16 +21,26 @@ endDFAs = {"'" : singleDFA,
            '"' : doubleDFA,
            'r' : None,
            'R' : None,
-           'u' : None,
-           'U' : None,
+           "u" : None,
+           "U" : None,
+           'f' : None,
+           'F' : None,
            'b' : None,
            'B' : None}
 
-for uniPrefix in ("", "u", "U", "b", "B"):
+for uniPrefix in ("", "b", "B", "f", "F"):
     for rawPrefix in ("", "r", "R"):
-        prefix = uniPrefix + rawPrefix
-        endDFAs[prefix + "'''"] = single3DFA
-        endDFAs[prefix + '"""'] = double3DFA
+        prefix_1 = uniPrefix + rawPrefix
+        prefix_2 = rawPrefix + uniPrefix
+
+        endDFAs[prefix_1 + "'''"] = single3DFA
+        endDFAs[prefix_1 + '"""'] = double3DFA
+        endDFAs[prefix_2 + "'''"] = single3DFA
+        endDFAs[prefix_2 + '"""'] = double3DFA
+
+for uniPrefix in ("u", "U"):
+    endDFAs[uniPrefix + "'''"] = single3DFA
+    endDFAs[uniPrefix + '"""'] = double3DFA
 
 whiteSpaceStatesAccepts = [True]
 whiteSpaceStates = [{'\t': 0, ' ': 0, '\x0c': 0}]
@@ -43,21 +53,33 @@ triple_quoted = {}
 for t in ("'''", '"""',
           "r'''", 'r"""', "R'''", 'R"""',
           "u'''", 'u"""', "U'''", 'U"""',
+          "f'''", 'f"""', "F'''", 'F"""',
+          "fr'''", 'fr"""', "Fr'''", 'Fr"""',
+          "fR'''", 'fR"""', "FR'''", 'FR"""',
+          "rf'''", 'rf"""', "rF'''", 'rF"""',
+          "Rf'''", 'Rf"""', "RF'''", 'RF"""',
           "b'''", 'b"""', "B'''", 'B"""',
-          "ur'''", 'ur"""', "Ur'''", 'Ur"""',
-          "uR'''", 'uR"""', "UR'''", 'UR"""',
           "br'''", 'br"""', "Br'''", 'Br"""',
-          "bR'''", 'bR"""', "BR'''", 'BR"""'):
+          "bR'''", 'bR"""', "BR'''", 'BR"""',
+          "rb'''", 'rb"""', "rB'''", 'rB"""',
+          "Rb'''", 'Rb"""', "RB'''", 'RB"""'):
     triple_quoted[t] = t
 single_quoted = {}
 for t in ("'", '"',
           "r'", 'r"', "R'", 'R"',
           "u'", 'u"', "U'", 'U"',
+          "f'", 'f"', "F'", 'F"',
+          "fr'", 'fr"', "Fr'", 'Fr"',
+          "fR'", 'fR"', "FR'", 'FR"',
+          "rf'", 'rf"', "rF'", 'rF"',
+          "Rf'", 'Rf"', "RF'", 'RF"',
           "b'", 'b"', "B'", 'B"',
-          "ur'", 'ur"', "Ur'", 'Ur"',
-          "uR'", 'uR"', "UR'", 'UR"',
           "br'", 'br"', "Br'", 'Br"',
-          "bR'", 'bR"', "BR'", 'BR"'):
+          "bR'", 'bR"', "BR'", 'BR"',
+          "rb'", 'rb"', "rB'", 'rB"',
+          "Rb'", 'Rb"', "RB'", 'RB"'):
+
     single_quoted[t] = t
 
 tabsize = 8
+alttabsize = 1

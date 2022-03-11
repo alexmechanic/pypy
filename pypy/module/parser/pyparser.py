@@ -1,9 +1,8 @@
 from pypy.interpreter.baseobjspace import W_Root
 from pypy.interpreter.typedef import TypeDef
 from pypy.interpreter.gateway import interp2app, unwrap_spec
-from pypy.interpreter.error import OperationError
+from pypy.interpreter.error import OperationError, oefmt
 from pypy.interpreter.pyparser import pyparse, pygram, error
-from pypy.interpreter.astcompiler.astbuilder import ast_from_node
 from pypy.interpreter.astcompiler.codegen import compile_ast
 from rpython.rlib.objectmodel import specialize
 
@@ -17,9 +16,10 @@ def get_error(space):
 
 
 class W_STType(W_Root):
-    def __init__(self, tree, mode):
+    def __init__(self, tree, mode, recursive_parser=None):
         self.tree = tree
         self.mode = mode
+        self.recursive_parser = recursive_parser
 
     @specialize.arg(3)
     def _build_app_tree(self, space, node, seq_maker, with_lineno, with_column):
@@ -56,19 +56,10 @@ class W_STType(W_Root):
         return self._build_app_tree(space, self.tree, space.newlist,
                                     line_info, col_info)
 
-    @unwrap_spec(filename='text')
+    @unwrap_spec(filename='fsencode')
     def descr_compile(self, space, filename="<syntax-tree>"):
-        info = pyparse.CompileInfo(filename, self.mode)
-        try:
-            ast = ast_from_node(space, self.tree, info)
-            result = compile_ast(space, ast, info)
-        except error.IndentationError as e:
-            raise OperationError(space.w_IndentationError,
-                                 e.find_sourceline_and_wrap_info(space))
-        except error.SyntaxError as e:
-            raise OperationError(space.w_SyntaxError,
-                                 e.find_sourceline_and_wrap_info(space))
-        return result
+        raise oefmt(space.w_TypeError,
+            "The compile method no longer works on PyPy 3.9, the whole module was removed in CPython 3.10")
 
 W_STType.typedef = TypeDef("parser.st",
     issuite=interp2app(W_STType.descr_issuite),
@@ -90,7 +81,7 @@ def parse_python(space, source, mode):
     except error.SyntaxError as e:
         raise OperationError(space.w_SyntaxError,
                              e.find_sourceline_and_wrap_info(space, source))
-    return W_STType(tree, mode)
+    return W_STType(tree, mode, recursive_parser=parser)
 
 
 @unwrap_spec(source='text')

@@ -56,7 +56,7 @@ class AppTestModule(pytest.Module):
         pass
 
 def create_module(space, w_name, filename, source):
-    w_mod = Module(space, w_name, add_package=False)
+    w_mod = Module(space, w_name)
     w_dict = w_mod.getdict(space)
     space.setitem(w_dict, space.newtext('__file__'), space.newtext(filename))
     space.exec_(source, w_dict, w_dict, filename=filename)
@@ -112,9 +112,10 @@ class AppTestFunction(pytest.Item):
     def execute_appex(self, space, w_func):
         space.getexecutioncontext().set_sys_exc_info(None)
         sig = w_func.code._signature
-        if sig.varargname or sig.kwargname:
+        if sig.varargname or sig.kwargname or sig.kwonlyargnames:
             raise ValueError(
-                'Test functions may not use *args or **kwargs')
+                'Test functions may not use *args, **kwargs or '
+                'keyword-only args')
         args_w = self.get_fixtures(space, sig.argnames)
         try:
             space.call_function(w_func, *args_w)

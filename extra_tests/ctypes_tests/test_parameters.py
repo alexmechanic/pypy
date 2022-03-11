@@ -1,4 +1,4 @@
-from ctypes import *
+from ctypes import POINTER, c_void_p
 
 def test_pointer_subclasses():
     Void_pp = POINTER(c_void_p)

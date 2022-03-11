@@ -57,7 +57,7 @@ class SystemCompilationInfo(object):
         return str(pydname)
 
     def import_module(self, name, init=None, body='', filename=None,
-            include_dirs=None, PY_SSIZE_T_CLEAN=False):
+                      include_dirs=None, PY_SSIZE_T_CLEAN=False, use_imp=False):
         """
         init specifies the overall template of the module.
 
@@ -67,6 +67,9 @@ class SystemCompilationInfo(object):
         if filename is None, the module name will be used to construct the
         filename.
         """
+        if body or init:
+            if init is None:
+                init = "return PyModule_Create(&moduledef);"
         if init is not None:
             code = make_source(name, init, body, PY_SSIZE_T_CLEAN)
             kwds = dict(source_strings=[code])
@@ -78,24 +81,26 @@ class SystemCompilationInfo(object):
             kwds = dict(source_files=[filename])
         mod = self.compile_extension_module(
             name, include_dirs=include_dirs, **kwds)
-        return self.load_module(mod, name)
+        return self.load_module(mod, name, use_imp)
 
     def import_extension(self, modname, functions, prologue="",
             include_dirs=None, more_init="", PY_SSIZE_T_CLEAN=False):
         body = prologue + make_methods(functions, modname)
-        init = """Py_InitModule("%s", methods);
-               """ % (modname,)
+        init = """PyObject *mod = PyModule_Create(&moduledef);
+               """
         if more_init:
-            init += """#define INITERROR return
+            init += """#define INITERROR return NULL
                     """
             init += more_init
+        init += "\nreturn mod;"
         return self.import_module(
             name=modname, init=init, body=body, include_dirs=include_dirs,
             PY_SSIZE_T_CLEAN=PY_SSIZE_T_CLEAN)
 
 class ExtensionCompiler(SystemCompilationInfo):
     """Extension compiler for appdirect mode"""
-    def load_module(space, mod, name):
+    def load_module(space, mod, name, use_imp=False):
+        # use_imp is ignored, it is useful only for non-appdirect mode
         import imp
         return imp.load_dynamic(name, mod)
 
@@ -114,8 +119,14 @@ def make_methods(functions, modname):
     codes = []
     for funcname, flags, code in functions:
         cfuncname = "%s_%s" % (modname, funcname)
-        if 'METH_KEYWORDS' in flags:
+        if 'METH_FASTCALL' in flags and 'METH_KEYWORDS' in flags:
+            signature = ('(PyObject *self, PyObject *const *args, '
+                         'Py_ssize_t len_args, PyObject *kwnames)')
+        elif 'METH_KEYWORDS' in flags:
             signature = '(PyObject *self, PyObject *args, PyObject *kwargs)'
+        elif 'METH_FASTCALL' in flags:
+            signature = ('(PyObject *self, PyObject *const *args, '
+                         'Py_ssize_t len_args)')
         else:
             signature = '(PyObject *self, PyObject *args)'
         methods_table.append(
@@ -130,30 +141,28 @@ def make_methods(functions, modname):
 
     body = "\n".join(codes) + """
     static PyMethodDef methods[] = {
-    %s
+    %(methods)s
     { NULL }
     };
-    """ % ('\n'.join(methods_table),)
+    static struct PyModuleDef moduledef = {
+        PyModuleDef_HEAD_INIT,
+        "%(modname)s",  /* m_name */
+        NULL,           /* m_doc */
+        -1,             /* m_size */
+        methods,        /* m_methods */
+    };
+    """ % dict(methods='\n'.join(methods_table), modname=modname)
     return body
 
 def make_source(name, init, body, PY_SSIZE_T_CLEAN):
     code = """
     %(PY_SSIZE_T_CLEAN)s
     #include <Python.h>
-    /* fix for cpython 2.7 Python.h if running tests with -A
-        since pypy compiles with -fvisibility-hidden */
-    #undef PyMODINIT_FUNC
-    #ifdef __GNUC__
-    #  define RPY_EXPORTED extern __attribute__((visibility("default")))
-    #else
-    #  define RPY_EXPORTED extern __declspec(dllexport)
-    #endif
-    #define PyMODINIT_FUNC RPY_EXPORTED void
 
     %(body)s
 
     PyMODINIT_FUNC
-    init%(name)s(void) {
+    PyInit_%(name)s(void) {
     %(init)s
     }
     """ % dict(

@@ -1,15 +1,16 @@
+# encoding: utf-8
 import py
 
 from pypy.objspace.std.celldict import ModuleDictStrategy
 from pypy.objspace.std.dictmultiobject import W_DictObject, W_ModuleDictObject
 from pypy.objspace.std.test.test_dictmultiobject import (
     BaseTestRDictImplementation, BaseTestDevolvedDictImplementation, FakeSpace,
-    FakeString)
+    FakeUnicode)
 
 space = FakeSpace()
 
 class TestCellDict(object):
-    FakeString = FakeString
+    FakeString = FakeUnicode
 
     def test_basic_property_cells(self):
         strategy = ModuleDictStrategy(space)
@@ -50,12 +51,41 @@ class TestCellDict(object):
 
         v1 = strategy.version
         x = object()
-        d.setitem("a", x)
+        d.setitem(u"a", x)
         v2 = strategy.version
         assert v1 is not v2
-        d.setitem("a", x)
+        d.setitem(u"a", x)
         v3 = strategy.version
         assert v2 is v3
+
+    def test_module_no_cell_interface(self):
+        # uses real space, too hard to fake
+        from pypy.interpreter.mixedmodule import MixedModule
+        class M(MixedModule):
+            interpleveldefs = {}
+            appleveldefs = {}
+        w_mod = M(self.space, None)
+        assert isinstance(w_mod.w_dict, W_ModuleDictObject)
+
+        key = "a"
+        value1 = self.space.newint(1)
+        w_mod.setdictvalue(self.space, key, value1)
+
+        strategy = w_mod.w_dict.get_strategy()
+        storage = strategy.unerase(w_mod.w_dict.dstorage)
+        assert self.space.is_w(storage["a"], value1)
+
+        value2 = self.space.newint(5)
+        w_mod.setdictvalue_dont_introduce_cell(key, value2)
+        assert self.space.is_w(storage["a"], value2)
+
+    def test___import__not_a_cell(self):
+        # _frozen_importlib overrides __import__, which used to introduce a
+        # cell
+        w_dict = self.space.builtin.w_dict
+        storage = w_dict.get_strategy().unerase(w_dict.dstorage)
+        assert "Cell" not in repr(storage['__import__'])
+
 
 class AppTestModuleDict(object):
 
@@ -75,6 +105,8 @@ class AppTestModuleDict(object):
     def test_key_not_there(self):
         d = type(__builtins__)("abc").__dict__
         raises(KeyError, "d['def']")
+        assert 42 not in d
+        assert u"\udc00" not in d
 
     def test_fallback_evil_key(self):
         class F(object):
@@ -104,6 +136,32 @@ class AppTestModuleDict(object):
         assert "s" not in d
         assert F() not in d
 
+    def test_reversed(self):
+        import __pypy__
+        name = next(__pypy__.reversed_dict(__pypy__.__dict__))
+        assert isinstance(name, str)
+
+    def test_reversed_keys(self):
+        import __pypy__
+        d = type(__builtins__)("abc").__dict__
+        d['xyz'] = 123
+        d['def'] = 654
+        l = [key for key in reversed(d) if not key.startswith("__")]
+        print(l)
+        assert l == ['def', 'xyz']
+        l = [key for key in reversed(d.keys()) if not key.startswith("__")]
+        print(l)
+        assert l == ['def', 'xyz']
+        assert __pypy__.strategy(d) == "ModuleDictStrategy"
+        l = [v for v in reversed(d.values()) if v is not None and v != "abc"]
+        print(l)
+        assert l == [654, 123]
+        assert __pypy__.strategy(d) == "ModuleDictStrategy"
+
+        l = [(key, value) for (key, value) in reversed(d.items()) if not key.startswith("__")]
+        print(l)
+        assert l == [('def', 654), ('xyz', 123)]
+
 
 class TestModuleDictImplementation(BaseTestRDictImplementation):
     StrategyClass = ModuleDictStrategy
@@ -119,9 +177,12 @@ class AppTestCellDict(object):
     def setup_class(cls):
         if cls.runappdirect:
             py.test.skip("__repr__ doesn't work on appdirect")
-        strategy = ModuleDictStrategy(cls.space)
+
+    def setup_method(self, method):
+        space = self.space
+        strategy = ModuleDictStrategy(space)
         storage = strategy.get_empty_storage()
-        cls.w_d = W_ModuleDictObject(cls.space, strategy, storage)
+        self.w_d = W_ModuleDictObject(space, strategy, storage)
 
     def test_popitem(self):
         import __pypy__
@@ -141,4 +202,25 @@ class AppTestCellDict(object):
         d["a"] = 3
         del d["a"]
         d[object()] = 5
-        assert d.values() == [5]
+        assert list(d.values()) == [5]
+
+    def test_unicode(self):
+        import __pypy__
+
+        d = self.d
+        assert "ModuleDict" in __pypy__.internal_repr(d)
+        d['λ'] = True
+        assert "ModuleDict" in __pypy__.internal_repr(d)
+        assert list(d) == ['λ']
+        assert next(iter(d)) == 'λ'
+        assert "ModuleDict" in __pypy__.internal_repr(d)
+
+        d['foo'] = 'bar'
+        assert sorted(d) == ['foo', 'λ']
+        assert "ModuleDict" in __pypy__.internal_repr(d)
+
+        o = object()
+        d[o] = 'baz'
+        assert set(d) == set(['foo', 'λ', o])
+        assert "ObjectDictStrategy" in __pypy__.internal_repr(d)
+

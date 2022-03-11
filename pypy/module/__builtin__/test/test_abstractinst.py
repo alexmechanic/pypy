@@ -135,6 +135,14 @@ class AppTestAbstractInst:
         raises(TypeError, isinstance, x, BBase)
         assert not isinstance(x, BSub2)
 
+        class BadClass:
+            @property
+            def __class__(self):
+                raise RuntimeError
+        raises(RuntimeError, isinstance, BadClass(), bool)
+        # test another code path
+        raises(RuntimeError, isinstance, BadClass(), Foo)
+
     def test_abstract_issubclass(self):
         class MyBaseInst(object):
             pass
@@ -195,17 +203,19 @@ class AppTestAbstractInst:
                 """Implement issubclass(sub, cls)."""
                 candidates = cls.__dict__.get("__subclass__", set()) | set([cls])
                 return any(c in candidates for c in sub.mro())
-        class Integer:
 
-            __metaclass__ = ABC
+        # Equivalent to::
+        #     class Integer(metaclass=ABC):
+        #         __subclass__ = set([int])
+        # But with a syntax compatible with 2.x
+        Integer = ABC('Integer', (), dict(__subclass__=set([int])))
 
-            __subclass__ = set([int])
         assert issubclass(int, Integer)
         assert issubclass(int, (Integer,))
 
     def test_dont_call_instancecheck_fast_path(self):
         called = []
-        
+
         class M(type):
             def __instancecheck__(self, obj):
                 called.append("called")
@@ -240,39 +250,41 @@ class AppTestAbstractInst:
 
         assert issubclass(42, M()) is False
 
-    def test_exception_match_calls_subclasscheck(self):
+    def test_exception_match_does_not_call_subclasscheck(self):
         class Special(Exception):
             class __metaclass__(type):
                 def __subclasscheck__(cls1, cls2):
                     return True
         try:
             raise ValueError
-        except Special:
+        except ValueError:       # Python 3.x behaviour
             pass
 
-    def test_exception_raising_calls_subclasscheck(self):
+    def test_exception_raising_does_not_call_subclasscheck(self):
+        # test skipped: unsure how to get a non-normalized exception
+        # from pure Python.
         class Special(Exception):
             class __metaclass__(type):
                 def __subclasscheck__(cls1, cls2):
                     return True
         try:
-            raise Special, ValueError()
-        except ValueError:
+            skip("non-normalized exception") #raise Special, ValueError()
+        except Special:
             pass
 
     def test_exception_bad_subclasscheck(self):
+        """
         import sys
         class Meta(type):
             def __subclasscheck__(cls, subclass):
                 raise ValueError()
 
-        class MyException(Exception):
-            __metaclass__ = Meta
+        class MyException(Exception, metaclass=Meta):
             pass
 
         try:
             raise KeyError()
-        except MyException, e:
+        except MyException as e:
             assert False, "exception should not be a MyException"
         except KeyError:
             pass
@@ -280,14 +292,10 @@ class AppTestAbstractInst:
             assert False, "Should have raised KeyError"
         else:
             assert False, "Should have raised KeyError"
+        """
 
-        def g():
-            try:
-                return g()
-            except RuntimeError:
-                return sys.exc_info()
-        e, v, tb = g()
-        assert e is RuntimeError, str(e)
-        assert "maximum recursion depth exceeded" in str(v)
-
- 
+    def test_exception_contains_type_name(self):
+        with raises(TypeError) as e:
+            issubclass(type, None)
+        print(e.value)
+        assert "NoneType" in str(e.value)

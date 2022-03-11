@@ -70,7 +70,7 @@ class TestSequence(BaseApiTest):
         with pytest.raises(OperationError) as excinfo:
             PySequence_Fast(space, space.wrap(3), message)
         assert excinfo.value.match(space, space.w_TypeError)
-        assert space.str_w(excinfo.value.get_w_value(space)) == "message"
+        assert space.text_w(excinfo.value.get_w_value(space)) == "message"
         rffi.free_charp(message)
 
     def test_get_slice(self, space, api):
@@ -99,7 +99,7 @@ class TestSequence(BaseApiTest):
         w_iter = api.PySeqIter_New(w_t)
         assert space.unwrap(space.next(w_iter)) == 1
         assert space.unwrap(space.next(w_iter)) == 2
-        exc = raises(OperationError, space.next, w_iter)
+        exc = pytest.raises(OperationError, space.next, w_iter)
         assert exc.value.match(space, space.w_StopIteration)
 
     def test_contains(self, space):
@@ -345,7 +345,7 @@ class AppTestSequenceObject(AppTestCpythonExtensionBase):
 
         assert module.test_fast_sequence(Map()) is True
 
-    def test_getitem(self):
+    def test_getitem_func_assignment(self):
         module = self.import_extension('foo', [
             ("dict_assignment", "METH_VARARGS",
              """
@@ -361,14 +361,9 @@ class AppTestSequenceObject(AppTestCpythonExtensionBase):
                 }
                 Py_RETURN_NONE;
             """),
-            ("test_get_item", "METH_VARARGS",
+            ("test_get_item0", "METH_O",
              """
-                PyObject *obj, *result=NULL;
-                int i;
-                if (PyArg_ParseTuple(args, "Oi:test_get_item", &obj, &i)) {
-                    result = PySequence_GetItem(obj, i);
-                };
-                return result;
+                return PySequence_GetItem(args, 0);
              """),
             ])
         class A(object):
@@ -380,7 +375,4 @@ class AppTestSequenceObject(AppTestCpythonExtensionBase):
         module.dict_assignment(A, getitem)
         a = A()
         assert a[12] == 42
-        assert module.test_get_item(a, 0) == 42
-        assert module.test_get_item(b'a', 0) == 'a'
-        raises(IndexError, module.test_get_item, b'a', -2)
-        raises(IndexError, module.test_get_item, b'a', 1)
+        assert module.test_get_item0(a) == 42

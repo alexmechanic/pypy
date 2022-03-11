@@ -2,8 +2,9 @@ import py
 from pypy.interpreter.baseobjspace import W_Root
 from pypy.interpreter.error import oefmt
 from pypy.interpreter.gateway import interp2app, ObjSpace
-from pypy.interpreter.typedef import TypeDef
+from pypy.interpreter.typedef import TypeDef, GetSetProperty
 from pypy.interpreter.executioncontext import AsyncAction, report_error
+from pypy.objspace.std.util import generic_alias_class_getitem
 from rpython.rlib import jit, rgc
 from rpython.rlib.rshrinklist import AbstractShrinkList
 from rpython.rlib.objectmodel import specialize
@@ -150,6 +151,7 @@ class WeakrefLifeline(W_Root):
                 except Exception as e:
                     report_error(self.space, e,
                                  "weakref callback ", w_ref.w_callable)
+                w_ref.w_callable = None
 
 
 # ____________________________________________________________
@@ -249,6 +251,9 @@ class W_Weakref(W_WeakrefBase):
     def descr__ne__(self, space, w_ref2):
         return self.compare(space, w_ref2, invert=True)
 
+    def descr_callback(self, space):
+        return self.w_callable
+
 def getlifeline(space, w_obj):
     lifeline = w_obj.getweakref()
     if lifeline is None:
@@ -277,6 +282,9 @@ which is called with 'obj' as an argument when it is about to be finalized.""",
     __hash__ = interp2app(W_Weakref.descr_hash),
     __call__ = interp2app(W_Weakref.descr_call),
     __repr__ = interp2app(W_WeakrefBase.descr__repr__),
+    __callback__ = GetSetProperty(W_Weakref.descr_callback),
+    __class_getitem__ = interp2app(
+        generic_alias_class_getitem, as_classmethod=True),
 )
 
 
@@ -389,13 +397,19 @@ for opname, _, arity, special_methods in ObjSpace.MethodTable:
             proxy_typedef_dict[special_method] = interp2app(func)
             callable_proxy_typedef_dict[special_method] = interp2app(func)
 
-# __unicode__ is not yet a space operation
-def proxy_unicode(space, w_obj):
+# __bytes__ is not yet a space operation
+def proxy_bytes(space, w_obj):
     w_obj = force(space, w_obj)
-    return space.call_method(w_obj, '__unicode__')
-proxy_typedef_dict['__unicode__'] = interp2app(proxy_unicode)
-callable_proxy_typedef_dict['__unicode__'] = interp2app(proxy_unicode)
+    return space.call_method(w_obj, '__bytes__')
+proxy_typedef_dict['__bytes__'] = interp2app(proxy_bytes)
+callable_proxy_typedef_dict['__bytes__'] = interp2app(proxy_bytes)
 
+# neither is __reversed__
+def proxy_reversed(space, w_obj):
+    w_obj = force(space, w_obj)
+    return space.call_method(w_obj, '__reversed__')
+proxy_typedef_dict['__reversed__'] = interp2app(proxy_reversed)
+callable_proxy_typedef_dict['__reversed__'] = interp2app(proxy_reversed)
 
 W_Proxy.typedef = TypeDef("weakproxy",
     __new__ = interp2app(descr__new__proxy),

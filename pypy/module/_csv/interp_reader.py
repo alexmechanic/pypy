@@ -1,18 +1,18 @@
-from rpython.rlib.rstring import StringBuilder
+from rpython.rlib.rutf8 import Utf8StringIterator, Utf8StringBuilder, unichr_as_utf8
 from rpython.rlib import objectmodel
+from rpython.rlib.rarithmetic import r_uint
 from pypy.interpreter.baseobjspace import W_Root
-from pypy.interpreter.error import OperationError, oefmt
+from pypy.interpreter.error import OperationError
 from pypy.interpreter.gateway import unwrap_spec
 from pypy.interpreter.typedef import TypeDef, interp2app
 from pypy.interpreter.typedef import interp_attrproperty_w, interp_attrproperty
 from pypy.module._csv.interp_csv import _build_dialect
 from pypy.module._csv.interp_csv import (QUOTE_MINIMAL, QUOTE_ALL,
                                          QUOTE_NONNUMERIC, QUOTE_NONE)
-from pypy.objspace.std.util import wrap_parsestringerror
 
 (START_RECORD, START_FIELD, ESCAPED_CHAR, IN_FIELD,
  IN_QUOTED_FIELD, ESCAPE_IN_QUOTED_FIELD, QUOTE_IN_QUOTED_FIELD,
- EAT_CRNL) = range(8)
+ EAT_CRNL, AFTER_ESCAPED_CRNL) = range(9)
 
 
 class W_Reader(W_Root):
@@ -22,6 +22,7 @@ class W_Reader(W_Root):
         self.dialect = dialect
         self.w_iter = w_iter
         self.line_num = 0
+        self.sizehint = 1  # just used for first line
 
     def iter_w(self):
         return self
@@ -29,36 +30,30 @@ class W_Reader(W_Root):
     @objectmodel.dont_inline
     def error(self, msg):
         space = self.space
+        msg = 'line %d: %s' % (self.line_num, msg)
         w_module = space.getbuiltinmodule('_csv')
         w_error = space.getattr(w_module, space.newtext('Error'))
-        raise oefmt(w_error, "line %d: %s", self.line_num, msg)
+        raise OperationError(w_error, space.newtext(msg))
 
     def add_char(self, field_builder, c):
         assert field_builder is not None
         if field_builder.getlength() >= field_limit.limit:
             raise self.error("field larger than field limit")
-        field_builder.append(c)
+        field_builder.append_code(c)
 
     def save_field(self, field_builder):
         space = self.space
         field = field_builder.build()
+        w_obj = space.newutf8(field, field_builder.getlength())
         if self.numeric_field:
-            from rpython.rlib.rstring import ParseStringError
-            from rpython.rlib.rfloat import string_to_float
             self.numeric_field = False
-            try:
-                ff = string_to_float(field)
-            except ParseStringError as e:
-                raise wrap_parsestringerror(space, e, space.newtext(field))
-            w_obj = space.newfloat(ff)
-        else:
-            w_obj = space.newtext(field)
+            w_obj = space.call_function(space.w_float, w_obj)
         self.fields_w.append(w_obj)
 
     def next_w(self):
         space = self.space
         dialect = self.dialect
-        self.fields_w = []
+        self.fields_w = objectmodel.newlist_hint(self.sizehint)
         self.numeric_field = False
         field_builder = None  # valid iff state not in [START_RECORD, EAT_CRNL]
         state = START_RECORD
@@ -73,19 +68,22 @@ class W_Reader(W_Root):
                             (len(field_builder.build()) > 0 or
                              state == IN_QUOTED_FIELD)):
                         if dialect.strict:
-                            raise self.error("newline inside string")
+                            raise self.error("unexpected end of data")
                         else:
                             self.save_field(field_builder)
                             break
                 raise
             self.line_num += 1
-            line = space.text_w(w_line)
-            for c in line:
-                if c == '\0':
+            if space.isinstance_w(w_line, space.w_bytes):
+                raise self.error("iterator should return strings, not bytes "
+                                 "(did you open the file in text mode?")
+            line = space.utf8_w(w_line)
+            for c in Utf8StringIterator(line):
+                if c == 0:
                     raise self.error("line contains NULL byte")
 
                 if state == START_RECORD:
-                    if c == '\n' or c == '\r':
+                    if c == ord(u'\n') or c == ord(u'\r'):
                         state = EAT_CRNL
                         continue
                     # normal character - handle as START_FIELD
@@ -93,9 +91,9 @@ class W_Reader(W_Root):
                     # fall-through to the next case
 
                 if state == START_FIELD:
-                    field_builder = StringBuilder(64)
+                    field_builder = Utf8StringBuilder(64)
                     # expecting field
-                    if c == '\n' or c == '\r':
+                    if c == ord(u'\n') or c == ord(u'\r'):
                         # save empty field
                         self.save_field(field_builder)
                         state = EAT_CRNL
@@ -106,7 +104,7 @@ class W_Reader(W_Root):
                     elif c == dialect.escapechar:
                         # possible escaped character
                         state = ESCAPED_CHAR
-                    elif c == ' ' and dialect.skipinitialspace:
+                    elif c == ord(u' ') and dialect.skipinitialspace:
                         # ignore space at start of field
                         pass
                     elif c == dialect.delimiter:
@@ -120,12 +118,16 @@ class W_Reader(W_Root):
                         state = IN_FIELD
 
                 elif state == ESCAPED_CHAR:
-                    self.add_char(field_builder, c)
-                    state = IN_FIELD
+                    if c == ord(u'\n') or c == ord(u'\r'):
+                        self.add_char(field_builder, c)
+                        state = AFTER_ESCAPED_CRNL
+                    else:
+                        self.add_char(field_builder, c)
+                        state = IN_FIELD
 
-                elif state == IN_FIELD:
+                elif state == IN_FIELD or state == AFTER_ESCAPED_CRNL:
                     # in unquoted field
-                    if c == '\n' or c == '\r':
+                    if c == ord(u'\n') or c == ord(u'\r'):
                         # end of line
                         self.save_field(field_builder)
                         state = EAT_CRNL
@@ -172,7 +174,7 @@ class W_Reader(W_Root):
                         # save field - wait for new field
                         self.save_field(field_builder)
                         state = START_FIELD
-                    elif c == '\n' or c == '\r':
+                    elif c == ord(u'\n') or c == ord(u'\r'):
                         # end of line
                         self.save_field(field_builder)
                         state = EAT_CRNL
@@ -182,34 +184,38 @@ class W_Reader(W_Root):
                     else:
                         # illegal
                         raise self.error("'%s' expected after '%s'" % (
-                            dialect.delimiter, dialect.quotechar))
+                            unichr_as_utf8(r_uint(dialect.delimiter)), unichr_as_utf8(r_uint(dialect.quotechar))))
 
                 elif state == EAT_CRNL:
-                    if not (c == '\n' or c == '\r'):
+                    if not (c == ord(u'\n') or c == ord(u'\r')):
                         raise self.error("new-line character seen in unquoted "
-                                        "field - do you need to open the file "
-                                        "in universal-newline mode?")
+                                         "field - do you need to open the file "
+                                         "in universal-newline mode?")
 
             if state == IN_FIELD or state == QUOTE_IN_QUOTED_FIELD:
                 self.save_field(field_builder)
                 break
             elif state == ESCAPED_CHAR:
-                self.add_char(field_builder, '\n')
+                self.add_char(field_builder, ord(u'\n'))
                 state = IN_FIELD
             elif state == IN_QUOTED_FIELD:
                 pass
             elif state == ESCAPE_IN_QUOTED_FIELD:
-                self.add_char(field_builder, '\n')
+                self.add_char(field_builder, ord(u'\n'))
                 state = IN_QUOTED_FIELD
             elif state == START_FIELD:
                 # save empty field
-                field_builder = StringBuilder(1)
+                field_builder = Utf8StringBuilder()
                 self.save_field(field_builder)
                 break
+            elif state == AFTER_ESCAPED_CRNL:
+                continue
             else:
                 break
         #
         w_result = space.newlist(self.fields_w)
+        # assume all lines have the same number of fields
+        self.sizehint = len(self.fields_w)
         self.fields_w = None
         return w_result
 
@@ -250,7 +256,7 @@ W_Reader.typedef = TypeDef(
         line_num = interp_attrproperty('line_num', W_Reader,
             wrapfn="newint"),
         __iter__ = interp2app(W_Reader.iter_w),
-        next = interp2app(W_Reader.next_w),
+        __next__ = interp2app(W_Reader.next_w),
         __doc__ = """CSV reader
 
 Reader objects are responsible for reading and parsing tabular data

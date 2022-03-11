@@ -4,7 +4,7 @@ from pypy.module._cffi_backend.ctypeobj import W_CType
 
 
 class AppTest_fast_path_from_list(object):
-    spaceconfig = dict(usemodules=('_cffi_backend', 'cStringIO'))
+    spaceconfig = dict(usemodules=('_cffi_backend',))
 
     def setup_method(self, meth):
         def forbidden(*args):
@@ -75,9 +75,9 @@ class AppTest_fast_path_from_list(object):
     def test_fast_init_ulong_from_list(self):
         import sys
         import _cffi_backend
-        maxlong = sys.maxint
+        maxlong = sys.maxsize
         if sys.platform == 'win32':
-            # maxlong == 2**31-1 < sys.maxint == 2**63-1 on win64!
+            # maxlong == 2**31-1 < sys.maxsize == 2**63-1 on win64!
             maxlong = int(2**31-1)
         ULONG = _cffi_backend.new_primitive_type('unsigned long')
         P_ULONG = _cffi_backend.new_pointer_type(ULONG)
@@ -120,7 +120,7 @@ class AppTest_fast_path_from_list(object):
 
 
 class AppTest_fast_path_bug(object):
-    spaceconfig = dict(usemodules=('_cffi_backend', 'cStringIO'))
+    spaceconfig = dict(usemodules=('_cffi_backend',))
 
     def test_bug_not_list_or_tuple(self):
         import _cffi_backend
@@ -133,7 +133,7 @@ class AppTest_fast_path_bug(object):
 
 
 class AppTest_fast_path_to_list(object):
-    spaceconfig = dict(usemodules=('_cffi_backend', 'cStringIO'))
+    spaceconfig = dict(usemodules=('_cffi_backend',))
 
     def setup_method(self, meth):
         from pypy.interpreter import gateway

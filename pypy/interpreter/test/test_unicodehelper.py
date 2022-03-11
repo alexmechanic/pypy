@@ -1,98 +1,76 @@
 # encoding: utf-8
 import pytest
-try:
-    from hypothesis import given, strategies
-    HAS_HYPOTHESIS = True
-except ImportError:
-    HAS_HYPOTHESIS = False
-import struct
-import sys
 
-from rpython.rlib import rutf8
+from pypy.interpreter.unicodehelper import (
+    utf8_encode_utf_8, decode_utf8sp, ErrorHandlerError
+)
 
-from pypy.interpreter.unicodehelper import str_decode_utf8
+from pypy.interpreter.unicodehelper import str_decode_utf8, utf8_encode_latin_1
 from pypy.interpreter.unicodehelper import utf8_encode_ascii, str_decode_ascii
 from pypy.interpreter.unicodehelper import utf8_encode_latin_1, str_decode_unicode_escape
+from pypy.interpreter.unicodehelper import str_decode_raw_unicode_escape
 from pypy.interpreter import unicodehelper as uh
 from pypy.module._codecs.interp_codecs import CodecState
 
-def decode_utf8(u):
-    return str_decode_utf8(u, True, "strict", None)
+class Hit(Exception):
+    pass
 
-def test_decode_utf8():
-    assert decode_utf8("abc") == ("abc", 3, 3)
-    assert decode_utf8("\xe1\x88\xb4") == ("\xe1\x88\xb4", 3, 1)
-    assert decode_utf8("\xed\xa0\x80") == ("\xed\xa0\x80", 3, 1)
-    assert decode_utf8("\xed\xb0\x80") == ("\xed\xb0\x80", 3, 1)
-    assert decode_utf8("\xed\xa0\x80\xed\xb0\x80") == (
-        "\xed\xa0\x80\xed\xb0\x80", 6, 2)
-    assert decode_utf8("\xf0\x90\x80\x80") == ("\xf0\x90\x80\x80", 4, 1)
+class FakeSpace:
+    def __getattr__(self, name):
+        if name in ('w_UnicodeEncodeError', 'w_UnicodeDecodeError'):
+            raise Hit
+        raise AttributeError(name)
 
-def test_utf8_encode_ascii():
-    assert utf8_encode_ascii("abc", "??", "??") == "abc"
-    def eh(errors, encoding, reason, p, start, end):
-        lst.append((errors, encoding, p, start, end))
-        return "<FOO>", end
-    lst = []
-    input = u"\u1234".encode("utf8")
-    assert utf8_encode_ascii(input, "??", eh) == "<FOO>"
-    assert lst == [("??", "ascii", input, 0, 1)]
-    lst = []
-    input = u"\u1234\u5678abc\u8765\u4321".encode("utf8")
-    assert utf8_encode_ascii(input, "??", eh) == "<FOO>abc<FOO>"
-    assert lst == [("??", "ascii", input, 0, 2),
-                   ("??", "ascii", input, 5, 7)]
 
-if HAS_HYPOTHESIS:
-    @given(strategies.text())
-    def test_utf8_encode_ascii_2(u):
-        def eh(errors, encoding, reason, p, start, end):
-            return "?" * (end - start), end
+def test_encode_utf_8_combine_surrogates():
+    """
+    In the case of a surrogate pair, the error handler should
+    called with a start and stop position of the full surrogate
+    pair (new behavior in python3.6)
+    """
+    #               /--surrogate pair--\
+    #    \udc80      \ud800      \udfff
+    b = "\xed\xb2\x80\xed\xa0\x80\xed\xbf\xbf"
 
-        assert utf8_encode_ascii(u.encode("utf8"),
-                                "replace", eh) == u.encode("ascii", "replace")
+    calls = []
 
-def test_str_decode_ascii():
-    assert str_decode_ascii("abc", "??", True, "??") == ("abc", 3, 3)
-    def eh(errors, encoding, reason, p, start, end):
-        lst.append((errors, encoding, p, start, end))
-        return u"\u1234\u5678".encode("utf8"), end
-    lst = []
-    input = "\xe8"
-    exp = u"\u1234\u5678".encode("utf8")
-    assert str_decode_ascii(input, "??", True, eh) == (exp, 1, 2)
-    assert lst == [("??", "ascii", input, 0, 1)]
-    lst = []
-    input = "\xe8\xe9abc\xea\xeb"
-    assert str_decode_ascii(input, "??", True, eh) == (
-        exp + exp + "abc" + exp + exp, 7, 11)
-    assert lst == [("??", "ascii", input, 0, 1),
-                   ("??", "ascii", input, 1, 2),
-                   ("??", "ascii", input, 5, 6),
-                   ("??", "ascii", input, 6, 7)]
-if HAS_HYPOTHESIS:
-    @given(strategies.text())
-    def test_unicode_raw_escape(u):
-        r = uh.utf8_encode_raw_unicode_escape(u.encode("utf8"), 'strict', None)
-        assert r == u.encode("raw-unicode-escape")
+    def errorhandler(errors, encoding, msg, s, start, end):
+        """
+        This handler will be called twice, so asserting both times:
 
-    @given(strategies.text())
-    def test_unicode_escape(u):
-        r = uh.utf8_encode_unicode_escape(u.encode("utf8"), "strict", None)
-        assert r == u.encode("unicode-escape")
+        1. the first time, 0xDC80 will be handled as a single surrogate,
+           since it is a standalone character and an invalid surrogate.
+        2. the second time, the characters will be 0xD800 and 0xDFFF, since
+           that is a valid surrogate pair.
+        """
+        calls.append(s.decode("utf-8")[start:end])
+        return 'abc', end, 'b', s
 
-def test_encode_decimal(space):
-    assert uh.unicode_encode_decimal(u' 12, 34 ', None) == ' 12, 34 '
-    with pytest.raises(ValueError):
-        uh.unicode_encode_decimal(u' 12, \u1234 '.encode('utf8'), None)
-    state = space.fromcache(CodecState)
-    handler = state.encode_error_handler
-    assert uh.unicode_encode_decimal(
-        u'u\u1234\u1235v'.encode('utf8'), 'replace', handler) == 'u??v'
+    res = utf8_encode_utf_8(
+        b, 'strict',
+        errorhandler=errorhandler,
+        allow_surrogates=False
+    )
+    assert res == "abcabc"
+    assert calls == [u'\udc80', u'\uD800\uDFFF']
 
-    result = uh.unicode_encode_decimal(
-        u'12\u1234'.encode('utf8'), 'xmlcharrefreplace', handler)
-    assert result == '12&#4660;'
+def test_bad_error_handler():
+    b = u"\udc80\ud800\udfff".encode("utf-8")
+    def errorhandler(errors, encoding, msg, s, start, end):
+        return '', start, 'b', s # returned index is too small
+
+    pytest.raises(ErrorHandlerError, utf8_encode_utf_8, b, 'strict',
+                  errorhandler=errorhandler, allow_surrogates=False)
+
+def test_decode_utf8sp():
+    space = FakeSpace()
+    assert decode_utf8sp(space, "\xed\xa0\x80") == ("\xed\xa0\x80", 1, 3)
+    assert decode_utf8sp(space, "\xed\xb0\x80") == ("\xed\xb0\x80", 1, 3)
+    got = decode_utf8sp(space, "\xed\xa0\x80\xed\xb0\x80")
+    assert map(ord, got[0].decode('utf8')) == [0xd800, 0xdc00]
+    got = decode_utf8sp(space, "\xf0\x90\x80\x80")
+    assert map(ord, got[0].decode('utf8')) == [0x10000]
+
 
 def test_utf8_encode_latin1_ascii_prefix():
     utf8 = b'abcde\xc3\xa4g'
@@ -106,7 +84,7 @@ def test_latin1_shortcut_bug(space):
     sin = u"a\xac\u1234\u20ac\u8000"
     assert utf8_encode_latin_1(sin.encode("utf-8"), "backslashreplace", handler) == sin.encode("latin-1", "backslashreplace")
 
-def test_unicode_escape_incremental_bug(space):
+def test_unicode_escape_incremental_bug():
     class FakeUnicodeDataHandler:
         def call(self, name):
             assert name == "QUESTION MARK"
@@ -115,8 +93,23 @@ def test_unicode_escape_incremental_bug(space):
     input = u"äҰ𐀂?"
     data = b'\\xe4\\u04b0\\U00010002\\N{QUESTION MARK}'
     for i in range(1, len(data)):
-        result1, lgt1, _ = str_decode_unicode_escape(data[:i], 'strict', False, None, unicodedata_handler)
-        result2, lgt2, _ = str_decode_unicode_escape(data[lgt1:i] + data[i:], 'strict', True, None, unicodedata_handler)
+        result1, _, lgt1, _ = str_decode_unicode_escape(data[:i], 'strict', False, None, unicodedata_handler)
+        result2, _, lgt2, _ = str_decode_unicode_escape(data[lgt1:i] + data[i:], 'strict', True, None, unicodedata_handler)
         assert lgt1 + lgt2 == len(data)
         assert input == (result1 + result2).decode("utf-8")
+
+def test_raw_unicode_escape_incremental_bug():
+    input = u"xҰa𐀂"
+    data = b'x\\u04b0a\\U00010002'
+    for i in range(1, len(data)):
+        result1, _, lgt1 = str_decode_raw_unicode_escape(data[:i], 'strict', False, None)
+        result2, _, lgt2 = str_decode_raw_unicode_escape(data[lgt1:i] + data[i:], 'strict', True, None)
+        assert lgt1 + lgt2 == len(data)
+        assert input == (result1 + result2).decode("utf-8")
+
+def test_raw_unicode_escape_backslash_without_escape():
+    data = b'[:/?#[\\]@]\\'
+    result, _, l = str_decode_raw_unicode_escape(data, 'strict', True, None)
+    assert l == len(data)
+    assert result == data
 

@@ -8,13 +8,13 @@ def _string_from_asn1(asn1):
     return _str_with_len(ffi.cast("char*",data), length)
 
 def _str_with_len(char_ptr, length):
-    return ffi.buffer(char_ptr, length)[:]
+    return ffi.buffer(char_ptr, length)[:].decode('utf-8').strip('\n')
 
 def _bytes_with_len(char_ptr, length):
     return ffi.buffer(char_ptr, length)[:]
 
 def _str_to_ffi_buffer(view):
-    if isinstance(view, unicode):
+    if isinstance(view, str):
         return ffi.from_buffer(view.encode())
     elif isinstance(view, memoryview):
         # NOTE pypy limitation StringBuffer does not allow
@@ -25,7 +25,7 @@ def _str_to_ffi_buffer(view):
     return ffi.from_buffer(view)
 
 def _str_from_buf(buf):
-    return ffi.string(buf)
+    return ffi.string(buf).decode('utf-8')
 
 def _cstr_decode_fs(buf):
     if buf == ffi.NULL:

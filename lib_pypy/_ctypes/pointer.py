@@ -27,7 +27,7 @@ class PointerType(_CDataMeta):
         # XXX check if typedict['_type_'] is any sane
         # XXX remember about paramfunc
         obj = type.__new__(self, name, cls, typedict)
-        for k, v in d.iteritems():
+        for k, v in d.items():
             setattr(obj, k, v)
         if '_type_' in typedict:
             self.set_type(obj, typedict['_type_'])
@@ -89,8 +89,7 @@ class PointerType(_CDataMeta):
     def _getformat(self):
         return '&' + self._type_._getformat()
 
-class _Pointer(_CData):
-    __metaclass__ = PointerType
+class _Pointer(_CData, metaclass=PointerType):
 
     def getcontents(self):
         addr = self._buffer[0]
@@ -101,7 +100,7 @@ class _Pointer(_CData):
         return instance
 
     def setcontents(self, value):
-        if not isinstance(value, self._type_):
+        if not (isinstance(value, _CData) or isinstance(value, self._type_)):
             raise TypeError("expected %s instead of %s" % (
                 self._type_.__name__, type(value).__name__))
         self._objects = {keepalive_key(1):value}
@@ -133,7 +132,7 @@ class _Pointer(_CData):
         address += index * sizeof(self._type_)
         cobj._copy_to(address)
 
-    def __nonzero__(self):
+    def __bool__(self):
         return self._buffer[0] != 0
 
     contents = property(getcontents, setcontents)
@@ -147,7 +146,7 @@ def _cast_addr(obj, _, tp):
         raise TypeError("cast() argument 2 must be a pointer type, not %s"
                         % (tp,))
     result = tp._newowninstance_()
-    if isinstance(obj, (int, long)):
+    if isinstance(obj, int):
         result._buffer[0] = obj
         return result
     elif obj is None:
@@ -155,7 +154,7 @@ def _cast_addr(obj, _, tp):
     elif isinstance(obj, Array):
         result._buffer[0] = obj._buffer
     elif isinstance(obj, bytes):
-        result._buffer[0] = buffer(obj)._pypy_raw_address()
+        result._buffer[0] = memoryview(obj)._pypy_raw_address()
         return result
     elif not (isinstance(obj, _CData) and type(obj)._is_pointer_like()):
         raise TypeError("cast() argument 1 must be a pointer, not %s"
@@ -198,4 +197,3 @@ def POINTER(cls):
 @builtinify
 def pointer(inst):
     return POINTER(type(inst))(inst)
-

@@ -2,7 +2,7 @@ import pytest
 
 from pypy.module.cpyext.test.test_api import BaseApiTest, raises_w
 from pypy.module.cpyext.test.test_cpyext import AppTestCpythonExtensionBase
-from rpython.rtyper.lltypesystem import rffi, lltype
+from rpython.rtyper.lltypesystem import rffi
 from pypy.module.cpyext.pyobject import get_w_obj_and_decref
 from pypy.module.cpyext.api import (
     Py_LT, Py_LE, Py_NE, Py_EQ, Py_GE, Py_GT, INTP_real)
@@ -11,8 +11,7 @@ from pypy.module.cpyext.object import (
     PyObject_DelAttrString, PyObject_GetAttr, PyObject_DelAttr,
     PyObject_GetItem,
     PyObject_IsInstance, PyObject_IsSubclass, PyObject_AsFileDescriptor,
-    PyObject_Hash, PyObject_Cmp, PyObject_Unicode
-)
+    PyObject_Hash)
 
 class TestObject(BaseApiTest):
     def test_IsTrue(self, space, api):
@@ -29,7 +28,7 @@ class TestObject(BaseApiTest):
     def test_exception(self, space, api):
         w_obj = space.appexec([], """():
             class C:
-                def __nonzero__(self):
+                def __bool__(self):
                     raise ValueError
             return C()""")
 
@@ -108,15 +107,15 @@ class TestObject(BaseApiTest):
 
     def test_str(self, space, api):
         w_list = space.newlist([space.w_None, space.wrap(42)])
-        assert space.str_w(api.PyObject_Str(None)) == "<NULL>"
-        assert space.str_w(api.PyObject_Str(w_list)) == "[None, 42]"
-        assert space.str_w(api.PyObject_Str(space.wrap("a"))) == "a"
+        assert space.text_w(api.PyObject_Str(None)) == "<NULL>"
+        assert space.text_w(api.PyObject_Str(w_list)) == "[None, 42]"
+        assert space.text_w(api.PyObject_Str(space.wrap("a"))) == "a"
 
     def test_repr(self, space, api):
         w_list = space.newlist([space.w_None, space.wrap(42)])
-        assert space.str_w(api.PyObject_Repr(None)) == "<NULL>"
-        assert space.str_w(api.PyObject_Repr(w_list)) == "[None, 42]"
-        assert space.str_w(api.PyObject_Repr(space.wrap("a"))) == "'a'"
+        assert space.text_w(api.PyObject_Repr(None)) == "<NULL>"
+        assert space.text_w(api.PyObject_Repr(w_list)) == "[None, 42]"
+        assert space.text_w(api.PyObject_Repr(space.wrap("a"))) == "'a'"
 
     def test_RichCompare(self, space, api):
         def compare(w_o1, w_o2, opid):
@@ -198,28 +197,6 @@ class TestObject(BaseApiTest):
     def test_type(self, space, api):
         assert api.PyObject_Type(space.wrap(72)) is space.w_int
 
-    def test_compare(self, space, api):
-        assert api.PyObject_Compare(space.wrap(42), space.wrap(72)) == -1
-        assert api.PyObject_Compare(space.wrap(72), space.wrap(42)) == 1
-        assert api.PyObject_Compare(space.wrap("a"), space.wrap("a")) == 0
-
-    def test_cmp(self, space, api):
-        w = space.wrap
-        with lltype.scoped_alloc(INTP_real.TO, 1) as ptr:
-            assert api.PyObject_Cmp(w(42), w(72), ptr) == 0
-            assert ptr[0] == -1
-            assert api.PyObject_Cmp(w("a"), w("a"), ptr) == 0
-            assert ptr[0] == 0
-            with raises_w(space, UnicodeDecodeError):
-                PyObject_Cmp(space, w(u"\xe9"), w("\xe9"), ptr)
-
-    def test_unicode(self, space, api):
-        assert space.utf8_w(api.PyObject_Unicode(None)) == u"<NULL>"
-        assert space.utf8_w(api.PyObject_Unicode(space.wrap([]))) == u"[]"
-        assert space.utf8_w(api.PyObject_Unicode(space.wrap("e"))) == u"e"
-        with raises_w(space, UnicodeDecodeError):
-            PyObject_Unicode(space, space.wrap("\xe9"))
-
     def test_dir(self, space, api):
         w_dir = api.PyObject_Dir(space.sys)
         assert space.isinstance_w(w_dir, space.w_list)
@@ -227,7 +204,7 @@ class TestObject(BaseApiTest):
 
     def test_format(self, space, api):
         w_int = space.wrap(42)
-        fmt = space.str_w(api.PyObject_Format(w_int, space.wrap('#b')))
+        fmt = space.text_w(api.PyObject_Format(w_int, space.wrap('#b')))
         assert fmt == '0b101010'
 
 class AppTestObject(AppTestCpythonExtensionBase):
@@ -237,10 +214,7 @@ class AppTestObject(AppTestCpythonExtensionBase):
 
         AppTestCpythonExtensionBase.setup_class.im_func(cls)
         tmpname = str(pytest.ensuretemp('out', dir=0))
-        if cls.runappdirect:
-            cls.tmpname = tmpname
-        else:
-            cls.w_tmpname = cls.space.wrap(tmpname)
+        cls.w_tmpname = cls.space.wrap(tmpname)
 
         if not cls.runappdirect:
             cls.total_mem = 0
@@ -261,7 +235,7 @@ class AppTestObject(AppTestCpythonExtensionBase):
                 gateway.interp2app(_cur_memory_pressure))
         else:
             def _skip_test(*ignored):
-                pytest.skip("not for -A testing")
+                skip("not for -A testing")
             cls.w_reset_memory_pressure = _skip_test
 
     def teardown_class(cls):
@@ -273,15 +247,29 @@ class AppTestObject(AppTestCpythonExtensionBase):
         module = self.import_extension('foo', [
             ("malloctest", "METH_NOARGS",
              """
-                 PyObject *obj = PyObject_MALLOC(sizeof(PyIntObject));
-                 obj = PyObject_Init(obj, &PyInt_Type);
+                 PyObject *obj = PyObject_MALLOC(sizeof(PyFloatObject));
+                 obj = PyObject_Init(obj, &PyFloat_Type);
                  if (obj != NULL)
-                     ((PyIntObject *)obj)->ob_ival = -424344;
+                     ((PyFloatObject *)obj)->ob_fval = -12.34;
                  return obj;
              """)])
         x = module.malloctest()
-        assert type(x) is int
-        assert x == -424344
+        assert type(x) is float
+        assert x == -12.34
+
+    def test_object_calloc(self):
+        module = self.import_extension('foo', [
+            ("calloctest", "METH_NOARGS",
+             """
+                 PyObject *obj = PyObject_Calloc(1, sizeof(PyFloatObject));
+                 if (obj == NULL)
+                    return NULL;
+                 obj = PyObject_Init(obj, &PyFloat_Type);
+                 return obj;
+             """)])
+        x = module.calloctest()
+        assert type(x) is float
+        assert x == 0.0
 
     def test_object_realloc(self):
         if not self.runappdirect:
@@ -296,12 +284,12 @@ class AppTestObject(AppTestCpythonExtensionBase):
                  /* realloc() takes care of freeing orig, if changed */
                  if (copy == NULL)
                      Py_RETURN_NONE;
-                 ret = PyString_FromStringAndSize(copy, 12);
+                 ret = PyBytes_FromStringAndSize(copy, 12);
                  PyObject_Free(copy);
                  return ret;
              """)])
         x = module.realloctest()
-        assert x == 'hello world\x00'
+        assert x == b'hello world\x00'
 
     def test_TypeCheck(self):
         module = self.import_extension('foo', [
@@ -314,7 +302,6 @@ class AppTestObject(AppTestCpythonExtensionBase):
         assert module.typecheck(1, int)
         assert module.typecheck('foo', str)
         assert module.typecheck('foo', object)
-        assert module.typecheck(1L, long)
         assert module.typecheck(True, bool)
         assert module.typecheck(1.2, float)
         assert module.typecheck(int, type)
@@ -326,7 +313,7 @@ class AppTestObject(AppTestCpythonExtensionBase):
                  PyObject *fname = PyTuple_GetItem(args, 0);
                  PyObject *obj = PyTuple_GetItem(args, 1);
 
-                 FILE *fp = fopen(PyString_AsString(fname), "wb");
+                 FILE *fp = fopen(_PyUnicode_AsString(fname), "wb");
                  int ret;
                  if (fp == NULL)
                      Py_RETURN_NONE;
@@ -376,16 +363,51 @@ class AppTestObject(AppTestCpythonExtensionBase):
                 return obj;
             """)])
         a = module.empty_format('hello')
-        assert isinstance(a, unicode)
+        assert isinstance(a, str)
         a = module.empty_format(type('hello'))
-        assert isinstance(a, unicode)
+        assert isinstance(a, str)
+
+    def test_Bytes(self):
+        class sub1(bytes):
+            pass
+        class sub2(bytes):
+            def __bytes__(self):
+                return self
+        module = self.import_extension('test_Bytes', [
+            ('asbytes', 'METH_O',
+             """
+                return PyObject_Bytes(args);
+             """)])
+        assert type(module.asbytes(sub1(b''))) is bytes
+        assert type(module.asbytes(sub2(b''))) is sub2
+
+    def test_LengthHint(self):
+        import operator
+        class WithLen:
+            def __len__(self):
+                return 1
+            def __length_hint__(self):
+                return 42
+        class NoLen:
+            def __length_hint__(self):
+                return 2
+        module = self.import_extension('test_LengthHint', [
+            ('length_hint', 'METH_VARARGS',
+             """
+                 PyObject *obj = PyTuple_GET_ITEM(args, 0);
+                 Py_ssize_t i = PyLong_AsSsize_t(PyTuple_GET_ITEM(args, 1));
+                 return PyLong_FromSsize_t(PyObject_LengthHint(obj, i));
+             """)])
+        assert module.length_hint(WithLen(), 5) == operator.length_hint(WithLen(), 5) == 1
+        assert module.length_hint(NoLen(), 5) == operator.length_hint(NoLen(), 5) == 2
+        assert module.length_hint(object(), 5) == operator.length_hint(object(), 5) == 5
 
     def test_add_memory_pressure(self):
         self.reset_memory_pressure()    # for the potential skip
         module = self.import_extension('foo', [
             ("foo", "METH_O",
             """
-                _PyTraceMalloc_Track(0, 0, PyInt_AsLong(args) - sizeof(long));
+                PyTraceMalloc_Track(0, 0, PyLong_AsLong(args) - sizeof(long));
                 Py_INCREF(Py_None);
                 return Py_None;
             """)])
@@ -409,7 +431,7 @@ class AppTestObject(AppTestCpythonExtensionBase):
         module = self.import_extension('foo', [
             ("enter", "METH_O",
             """
-                return PyInt_FromLong(Py_ReprEnter(args));
+                return PyLong_FromLong(Py_ReprEnter(args));
             """),
             ("leave", "METH_O",
             """
@@ -445,6 +467,31 @@ class AppTestObject(AppTestCpythonExtensionBase):
         assert n == 1
         module.leave(obj2)
 
+    def test_GenericGetSetDict(self):
+        module = self.import_extension('test_GenericGetSetDict', [
+            ('test1', 'METH_VARARGS',
+             """
+                 PyObject *obj = PyTuple_GET_ITEM(args, 0);
+                 PyObject *newdict = PyTuple_GET_ITEM(args, 1);
+
+                 PyObject *olddict = PyObject_GenericGetDict(obj, NULL);
+                 if (olddict == NULL)
+                    return NULL;
+                 int res = PyObject_GenericSetDict(obj, newdict, NULL);
+                 if (res != 0)
+                     return NULL;
+                 return olddict;
+             """)])
+        class A:
+            pass
+        a = A()
+        a.x = 42
+        nd = {'y': 43}
+        d = module.test1(a, nd)
+        assert d == {'x': 42}
+        assert a.y == 43
+        assert a.__dict__ is nd
+
 
 class AppTestPyBuffer_FillInfo(AppTestCpythonExtensionBase):
     """
@@ -459,16 +506,16 @@ class AppTestPyBuffer_FillInfo(AppTestCpythonExtensionBase):
                 ("fillinfo", "METH_NOARGS",
                  """
     Py_buffer buf;
-    PyObject *str = PyString_FromString("hello, world.");
+    PyObject *str = PyBytes_FromString("hello, world.");
     PyObject *result;
 
-    if (PyBuffer_FillInfo(&buf, NULL, PyString_AsString(str), 13, 0, 0)) {
+    if (PyBuffer_FillInfo(&buf, NULL, PyBytes_AsString(str), 13, 0, 0)) {
         return NULL;
     }
 
     /* Check a few things we want to have happened.
      */
-    if (buf.buf != PyString_AsString(str)) {
+    if (buf.buf != PyBytes_AsString(str)) {
         PyErr_SetString(PyExc_ValueError, "buf field not initialized");
         return NULL;
     }
@@ -486,7 +533,7 @@ class AppTestPyBuffer_FillInfo(AppTestCpythonExtensionBase):
     /* Give back a new string to the caller, constructed from data in the
      * Py_buffer.
      */
-    if (!(result = PyString_FromStringAndSize(buf.buf, buf.len))) {
+    if (!(result = PyBytes_FromStringAndSize(buf.buf, buf.len))) {
         return NULL;
     }
 
@@ -498,7 +545,7 @@ class AppTestPyBuffer_FillInfo(AppTestCpythonExtensionBase):
     return result;
                  """)])
         result = module.fillinfo()
-        assert "hello, world." == result
+        assert b"hello, world." == result
 
 
     def test_fillWithObject(self):
@@ -511,10 +558,10 @@ class AppTestPyBuffer_FillInfo(AppTestCpythonExtensionBase):
                 ("fillinfo", "METH_NOARGS",
                  """
     Py_buffer buf;
-    PyObject *str = PyString_FromString("hello, world.");
+    PyObject *str = PyBytes_FromString("hello, world.");
     PyObject *result;
 
-    if (PyBuffer_FillInfo(&buf, str, PyString_AsString(str), 13, 0, 0)) {
+    if (PyBuffer_FillInfo(&buf, str, PyBytes_AsString(str), 13, 0, 0)) {
         return NULL;
     }
 
@@ -526,7 +573,7 @@ class AppTestPyBuffer_FillInfo(AppTestCpythonExtensionBase):
     /* Give back a new string to the caller, constructed from data in the
      * Py_buffer.  It better still be valid.
      */
-    if (!(result = PyString_FromStringAndSize(buf.buf, buf.len))) {
+    if (!(result = PyBytes_FromStringAndSize(buf.buf, buf.len))) {
         return NULL;
     }
 
@@ -546,7 +593,7 @@ class AppTestPyBuffer_FillInfo(AppTestCpythonExtensionBase):
     return result;
                  """)])
         result = module.fillinfo()
-        assert "hello, world." == result
+        assert b"hello, world." == result
 
 
     def test_fillReadonly(self):
@@ -557,9 +604,9 @@ class AppTestPyBuffer_FillInfo(AppTestCpythonExtensionBase):
                 ("fillinfo", "METH_NOARGS",
                  """
     Py_buffer buf;
-    PyObject *str = PyString_FromString("hello, world.");
+    PyObject *str = PyBytes_FromString("hello, world.");
 
-    if (PyBuffer_FillInfo(&buf, str, PyString_AsString(str), 13,
+    if (PyBuffer_FillInfo(&buf, str, PyBytes_AsString(str), 13,
                           1, PyBUF_WRITABLE)) {
         Py_DECREF(str);
         return NULL;
@@ -584,9 +631,9 @@ class AppTestPyBuffer_Release(AppTestCpythonExtensionBase):
                 ("release", "METH_NOARGS",
                  """
     Py_buffer buf;
-    buf.obj = PyString_FromString("release me!");
-    buf.buf = PyString_AsString(buf.obj);
-    buf.len = PyString_Size(buf.obj);
+    buf.obj = PyBytes_FromString("release me!");
+    buf.buf = PyBytes_AsString(buf.obj);
+    buf.len = PyBytes_Size(buf.obj);
 
     /* The Py_buffer owns the only reference to that string.  Release the
      * Py_buffer and the string should be released as well.

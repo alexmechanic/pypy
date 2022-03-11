@@ -1,5 +1,5 @@
-from pypy.interpreter.error import oefmt, wrap_oserror
-from pypy.interpreter.gateway import unwrap_spec
+from pypy.interpreter.error import OperationError, oefmt, wrap_oserror
+from pypy.interpreter.gateway import WrappedDefault, unwrap_spec
 from pypy.interpreter.pycode import CodeHookCache
 from pypy.interpreter.pyframe import PyFrame
 from pypy.interpreter.mixedmodule import MixedModule
@@ -15,6 +15,14 @@ from rpython.rtyper.lltypesystem import rffi
 
 def internal_repr(space, w_object):
     return space.newtext('%r' % (w_object,))
+
+def objects_in_repr(space):
+    """The identitydict of objects currently being repr().
+
+    This object is thread-local and can be used in a __repr__ method
+    to avoid recursion.
+    """
+    return space.get_objects_in_repr()
 
 
 def attach_gdb(space):
@@ -69,19 +77,9 @@ def hidden_applevel(space, w_func):
     func.getcode().hidden_applevel = True
     return w_func
 
-def get_hidden_tb(space):
-    """Return the traceback of the current exception being handled by a
-    frame hidden from applevel.
-    """
-    operr = space.getexecutioncontext().sys_exc_info(for_hidden=True)
-    return space.w_None if operr is None else operr.get_w_traceback(space)
-
 @unwrap_spec(meth='text')
 def lookup_special(space, w_obj, meth):
     """Lookup up a special method on an object."""
-    if space.is_oldstyle_instance(w_obj):
-        raise oefmt(space.w_TypeError,
-                    "this doesn't do what you want on old-style classes")
     w_descr = space.lookup(w_obj, meth)
     if w_descr is None:
         return space.w_None
@@ -157,13 +155,6 @@ def newlist_hint(space, sizehint):
     """ Create a new empty list that has an underlying storage of length sizehint """
     return space.newlist_hint(sizehint)
 
-@unwrap_spec(debug=bool)
-def set_debug(space, debug):
-    space.sys.debug = debug
-    space.setitem(space.builtin.w_dict,
-                  space.newtext('__debug__'),
-                  space.newbool(debug))
-
 @unwrap_spec(estimate=int)
 def add_memory_pressure(space, estimate):
     """ Add memory pressure of estimate bytes. Useful when calling a C function
@@ -175,14 +166,6 @@ def add_memory_pressure(space, estimate):
 def locals_to_fast(space, w_frame):
     assert isinstance(w_frame, PyFrame)
     w_frame.locals2fast()
-
-@unwrap_spec(w_module=MixedModule)
-def save_module_content_for_future_reload(space, w_module):
-    w_module.save_module_content_for_future_reload()
-
-def specialized_zip_2_lists(space, w_list1, w_list2):
-    from pypy.objspace.std.specialisedtupleobject import specialized_zip_2_lists
-    return specialized_zip_2_lists(space, w_list1, w_list2)
 
 def set_code_callback(space, w_callable):
     cache = space.fromcache(CodeHookCache)
@@ -219,9 +202,23 @@ def _promote(space, w_obj):
         jit.promote(w_obj)
     return w_obj
 
+@unwrap_spec(w_value=WrappedDefault(None), w_tb=WrappedDefault(None))
+def normalize_exc(space, w_type, w_value=None, w_tb=None):
+    operr = OperationError(w_type, w_value, w_tb)
+    operr.normalize_exception(space)
+    return operr.get_w_value(space)
+
 def stack_almost_full(space):
     """Return True if the stack is more than 15/16th full."""
     return space.newbool(rstack.stack_almost_full())
+
+def fsencode(space, w_obj):
+    """Direct access to the interp-level fsencode()"""
+    return space.fsencode(w_obj)
+
+def fsdecode(space, w_obj):
+    """Direct access to the interp-level fsdecode()"""
+    return space.fsdecode(w_obj)
 
 def side_effects_ok(space):
     """For use with the reverse-debugger: this function normally returns
@@ -261,3 +258,56 @@ def utf8content(space, w_u):
         raise oefmt(space.w_TypeError, "expected unicode string, got %T", w_u)
     return space.newbytes(w_u._utf8)
 
+def set_exc_info(space, w_type, w_value, w_traceback=None):
+    ec = space.getexecutioncontext()
+    ec.set_sys_exc_info3(w_type, w_value, w_traceback)
+
+def get_contextvar_context(space):
+    ec = space.getexecutioncontext()
+    context = ec.contextvar_context
+    if context:
+        return context
+    else:
+        return space.w_None
+
+def set_contextvar_context(space, w_obj):
+    ec = space.getexecutioncontext()
+    ec.contextvar_context = w_obj
+    return space.w_None
+
+def set_exc_info(space, w_type, w_value, w_traceback=None):
+    ec = space.getexecutioncontext()
+    ec.set_sys_exc_info3(w_type, w_value, w_traceback)
+
+def get_contextvar_context(space):
+    ec = space.getexecutioncontext()
+    context = ec.contextvar_context
+    if context:
+        return context
+    else:
+        return space.w_None
+
+def set_contextvar_context(space, w_obj):
+    ec = space.getexecutioncontext()
+    ec.contextvar_context = w_obj
+    return space.w_None
+
+
+@unwrap_spec(where='text')
+def write_unraisable(space, where, w_exc, w_obj):
+    """write_unraisable(where, exc, obj)
+       Equivalent to CPython's _PyErr_WriteUnraisableMsg()
+
+       where: msg to write (text)
+       exc:   error raised
+       obj:   object to print its repr
+    """
+    OperationError(space.type(w_exc), w_exc).write_unraisable(
+                            space, where, w_obj, with_traceback=True)
+
+def _testing_clear_audithooks(space):
+    if we_are_translated():
+        raise oefmt(space.w_RuntimeError, "can only use _testing_clear_audithooks before translation")
+    from pypy.module.sys.vm import AuditHolder
+    holder = space.fromcache(AuditHolder)
+    holder.hook_chain = None

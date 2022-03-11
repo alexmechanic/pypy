@@ -25,7 +25,8 @@ class AppTestMethodObject(AppTestCpythonExtensionBase):
              ),
             ])
         assert mod.getarg_NO() is None
-        raises(TypeError, mod.getarg_NO, 1)
+        excinfo = raises(TypeError, mod.getarg_NO, 1)
+        assert "(1 given)" in str(excinfo.value)
         raises(TypeError, mod.getarg_NO, 1, 1)
 
     def test_call_METH_O(self):
@@ -73,26 +74,30 @@ class AppTestMethodObject(AppTestCpythonExtensionBase):
         #
         raises(TypeError, mod.getarg_VARARGS, k=1)
 
-    def test_call_METH_OLDARGS(self):
+    def test_call_METH_VARARGS_FASTCALL(self):
         mod = self.import_extension('MyModule', [
-            ('getarg_OLD', 'METH_OLDARGS',
+            ('getarg_VA_FASTCALL', 'METH_VARARGS | METH_FASTCALL',
              '''
-             if(args) {
-                 return Py_BuildValue("Ol", args, args->ob_refcnt);
+             PyObject *arg_tuple = PyTuple_New(len_args);
+             for (Py_ssize_t i =0 ; i < len_args; i++) {
+                Py_INCREF(args[i]);
+                PyTuple_SetItem(arg_tuple, i, args[i]);
              }
-             else {
-                 Py_INCREF(Py_None);
-                 return Py_None;
-             }
+             return arg_tuple;
              '''
              ),
             ])
-        assert mod.getarg_OLD() is None
-        val, refcnt = mod.getarg_OLD(1)
-        assert val == 1
-        val, refcnt = mod.getarg_OLD(1, 2)
-        assert val == (1, 2)
-        assert refcnt == 1 # see the comments in the test above
+
+        tup = mod.getarg_VA_FASTCALL()
+        assert tup == ()
+
+        tup = mod.getarg_VA_FASTCALL(1)
+        assert tup == (1,)
+
+        tup = mod.getarg_VA_FASTCALL(1, 2, 3)
+        assert tup == (1, 2, 3)
+
+        raises(TypeError, mod.getarg_VA_FASTCALL, k=1)
 
     def test_call_METH_KEYWORDS(self):
         mod = self.import_extension('MyModule', [
@@ -110,13 +115,51 @@ class AppTestMethodObject(AppTestCpythonExtensionBase):
         assert mod.getarg_KW.__name__ == "getarg_KW"
         assert mod.getarg_KW(*(), **{}) == ((), {})
 
+    def test_call_METH_KEYWORDS_FASTCALL(self):
+        mod = self.import_extension('MyModule', [
+            ('getarg_KW_FASTCALL', 'METH_FASTCALL | METH_KEYWORDS',
+             '''
+             Py_ssize_t len_all_args = len_args;
+             if (!kwnames) {
+                 kwnames = Py_None;
+             }
+             else {
+                 len_all_args += PyTuple_Size(kwnames);
+             }
+             PyObject *arg_tuple = PyTuple_New(len_all_args);
+             for (Py_ssize_t i = 0 ; i < len_all_args; i++) {
+                Py_INCREF(args[i]);
+                PyTuple_SetItem(arg_tuple, i, args[i]);
+             }
+             return Py_BuildValue("NO", arg_tuple, kwnames);
+             '''
+             ),
+            ])
+        assert mod.getarg_KW_FASTCALL(1) == ((1,), None)
+        assert mod.getarg_KW_FASTCALL(1, 2) == ((1, 2), None)
+        assert mod.getarg_KW_FASTCALL(a=3, b=4) == ((3, 4), ('a', 'b'))
+        assert mod.getarg_KW_FASTCALL(1, 2, a=3, b=4) == ((1, 2, 3, 4), ('a', 'b'))
+        assert mod.getarg_KW_FASTCALL.__name__ == "getarg_KW_FASTCALL"
+        assert mod.getarg_KW_FASTCALL(*(), **{}) == ((), None)
+
+        res = mod.getarg_KW_FASTCALL(1, 2, a=5, b=6, *[3, 4], **{'c': 7})
+        assert res[0][:4] == (1, 2, 3, 4)  # positional
+        # keyword arguments may be ordered differently so compare as dict:
+        assert dict(zip(res[1], res[0][4:])) == {'a': 5, 'b': 6, 'c': 7}
+
+        args = tuple(range(50))
+        kwargs = {str(i): i for i in range(100)}
+        res = mod.getarg_KW_FASTCALL(*args, **kwargs)
+        assert res[0][:len(args)] == args
+        assert dict(zip(res[1], res[0][len(args):])) == kwargs
+
     def test_func_attributes(self):
         mod = self.import_extension('MyModule', [
             ('isCFunction', 'METH_O',
              '''
              if(PyCFunction_Check(args)) {
                  PyCFunctionObject* func = (PyCFunctionObject*)args;
-                 return PyString_FromString(func->m_ml->ml_name);
+                 return PyUnicode_FromString(func->m_ml->ml_name);
              }
              else {
                  Py_RETURN_FALSE;
@@ -164,8 +207,7 @@ class AppTestMethodObject(AppTestCpythonExtensionBase):
         A.f = mod.f
         A.g = lambda: 42
         # Unbound method
-        assert A.f() == 42
-        raises(TypeError, A.g)
+        assert A.f() == A.g() == 42
         # Bound method
         assert A().f() == 42
         raises(TypeError, A().g)
@@ -207,6 +249,26 @@ class AppTestMethodObject(AppTestCpythonExtensionBase):
         assert mod.getarg_NO.__module__ == 'MyModule'
         mod.getarg_NO.__module__ = 'foobar'
         assert mod.getarg_NO.__module__ == 'foobar'
+
+    def test_text_signature(self):
+        mod = self.import_module('docstrings')
+        assert mod.no_doc.__doc__ is None
+        assert mod.no_doc.__text_signature__ is None
+        assert mod.empty_doc.__doc__ is None
+        assert mod.empty_doc.__text_signature__ is None
+        assert mod.no_sig.__doc__
+        assert mod.no_sig.__text_signature__ is None
+        assert mod.invalid_sig.__doc__
+        assert mod.invalid_sig.__text_signature__ is None
+        assert mod.invalid_sig2.__doc__
+        assert mod.invalid_sig2.__text_signature__ is None
+        assert mod.with_sig.__doc__
+        assert mod.with_sig.__text_signature__ == '($module, /, sig)'
+        assert mod.with_sig_but_no_doc.__doc__ is None
+        assert mod.with_sig_but_no_doc.__text_signature__ == '($module, /, sig)'
+        assert mod.with_signature_and_extra_newlines.__doc__
+        assert (mod.with_signature_and_extra_newlines.__text_signature__ ==
+                '($module, /, parameter)')
 
     def test_callfunc(self):
         mod = self.import_extension('foo', [

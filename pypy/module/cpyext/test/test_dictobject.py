@@ -1,10 +1,12 @@
 import py
+from pytest import raises
 from rpython.rtyper.lltypesystem import rffi, lltype
 from pypy.module.cpyext.test.test_api import BaseApiTest, raises_w
 from pypy.module.cpyext.api import Py_ssize_tP, PyObjectP, PyTypeObjectPtr
 from pypy.module.cpyext.pyobject import make_ref, from_ref
 from pypy.interpreter.error import OperationError
 from pypy.module.cpyext.test.test_cpyext import AppTestCpythonExtensionBase
+from pypy.module.cpyext.dictproxyobject import *
 from pypy.module.cpyext.dictobject import *
 from pypy.module.cpyext.pyobject import decref
 
@@ -181,7 +183,20 @@ class AppTestDictObject(AppTestCpythonExtensionBase):
              if (!PyArg_ParseTuple(args, "OO", &d, &key)) {
                 return NULL;
              }
-             result = _PyDict_GetItemWithError(d, key);
+             result = PyDict_GetItemWithError(d, key);
+             if (result == NULL && !PyErr_Occurred())
+                Py_RETURN_NONE;
+             Py_XINCREF(result);
+             return result;
+             """),
+            ("dict_getitem_string", "METH_VARARGS",
+             """
+             PyObject *d, *result;
+             char * key;
+             if (!PyArg_ParseTuple(args, "Os", &d, &key)) {
+                return NULL;
+             }
+             result = _PyDict_GetItemStringWithError(d, key);
              if (result == NULL && !PyErr_Occurred())
                 Py_RETURN_NONE;
              Py_XINCREF(result);
@@ -189,9 +204,33 @@ class AppTestDictObject(AppTestCpythonExtensionBase):
              """)])
         d = {'foo': 'bar'}
         assert module.dict_getitem(d, 'foo') == 'bar'
+        assert module.dict_getitem_string(d, 'foo') == 'bar'
         assert module.dict_getitem(d, 'missing') is None
+        assert module.dict_getitem_string(d, 'missing') is None
         with raises(TypeError):
             module.dict_getitem(d, [])
+        with raises(TypeError):
+            module.dict_getitem_string(d, [])
+
+    def test_setdefault(self):
+        module = self.import_extension('foo', [
+            ("setdefault", "METH_VARARGS",
+             '''
+             PyObject *d, *key, *defaultobj, *val;
+             if (!PyArg_ParseTuple(args, "OOO", &d, &key, &defaultobj))
+                 return NULL;
+             val = PyDict_SetDefault(d, key, defaultobj);
+             Py_XINCREF(val);
+             return val;
+             ''')])
+
+        class Dict(dict):
+            def setdefault(self, key, default):
+                return 42
+
+        d = Dict()
+        assert module.setdefault(d, 'x', 1) == 1
+        assert d['x'] == 1
 
     def test_update(self):
         module = self.import_extension('foo', [
@@ -258,7 +297,7 @@ class AppTestDictObject(AppTestCpythonExtensionBase):
              return Py_BuildValue("(NN)", keys, values);
              ''')])
         d = {1: 'xyz', 3: 'abcd'}
-        assert module.keys_and_values(d) == (d.keys(), d.values())
+        assert module.keys_and_values(d) == (list(d.keys()), list(d.values()))
 
     def test_typedict2(self):
         module = self.import_extension('foo', [

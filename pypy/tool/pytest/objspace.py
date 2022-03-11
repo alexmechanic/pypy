@@ -15,12 +15,12 @@ def gettestobjspace(**kwds):
         # this exception is typically only raised if a module is not available.
         # in this case the test should be skipped
         py.test.skip(str(e))
+    if getattr(option, 'runappdirect', None):
+        return TinyObjSpace()
     key = config.getkey()
     try:
         return _SPACECACHE[key]
     except KeyError:
-        if getattr(option, 'runappdirect', None):
-            return TinyObjSpace(**kwds)
         space = maketestobjspace(config)
         _SPACECACHE[key] = space
         return space
@@ -33,45 +33,20 @@ def maketestobjspace(config=None):
     config.objspace.extmodules = 'pypy.tool.pytest.fake_pytest'
     space = make_objspace(config)
     space.startup() # Initialize all builtin modules
-    if config.objspace.std.reinterpretasserts:
-        space.setitem(space.builtin.w_dict, space.wrap('AssertionError'),
-                    appsupport.build_pytest_assertion(space))
     space.setitem(space.builtin.w_dict, space.wrap('raises'),
                   space.wrap(appsupport.app_raises))
     space.setitem(space.builtin.w_dict, space.wrap('skip'),
                   space.wrap(appsupport.app_skip))
+    space.setitem(space.builtin.w_dict, space.wrap('py3k_skip'),
+                  space.wrap(appsupport.app_py3k_skip))
     space.raises_w = appsupport.raises_w.__get__(space)
     return space
 
 
 class TinyObjSpace(object):
     """An object space that delegates everything to the hosting Python."""
-    def __init__(self, **kwds):
-        info = getattr(sys, 'pypy_translation_info', None)
-        for key, value in kwds.iteritems():
-            if key == 'usemodules':
-                if info is not None:
-                    for modname in value:
-                        ok = info.get('objspace.usemodules.%s' % modname,
-                                      False)
-                        if not ok:
-                            py.test.skip("cannot runappdirect test: "
-                                         "module %r required" % (modname,))
-                else:
-                    if '__pypy__' in value:
-                        py.test.skip("no module __pypy__ on top of CPython")
-                continue
-            if info is None:
-                continue
-            if ('translation.' + key) in info:
-                key = 'translation.' + key
-            has = info.get(key, None)
-            if has != value:
-                #print sys.pypy_translation_info
-                py.test.skip("cannot runappdirect test: space needs %s = %s, "\
-                    "while pypy-c was built with %s" % (key, value, has))
-
-        for name in ('int', 'long', 'str', 'unicode', 'None', 'ValueError',
+    def __init__(self):
+        for name in ('int', 'long', 'str', 'unicode', 'list', 'None', 'ValueError',
                 'OverflowError'):
             setattr(self, 'w_' + name, eval(name))
         self.w_bytes = bytes
@@ -82,17 +57,34 @@ class TinyObjSpace(object):
         body = body.lstrip()
         assert body.startswith('(')
         src = py.code.Source("def anonymous" + body)
-        d = {}
-        exec src.compile() in d
-        return d['anonymous'](*args)
+        return (src, args)
 
     def wrap(self, obj):
+        if isinstance(obj, str):
+            return obj.decode('utf-8')
+        if isinstance(obj, dict):
+            return dict((self.wrap(k), self.wrap(v))
+                        for k, v in obj.iteritems())
+        if isinstance(obj, tuple):
+            return tuple(self.wrap(item) for item in obj)
+        if isinstance(obj, list):
+            return list(self.wrap(item) for item in obj)
+        return obj
+
+    def newtext(self, obj):
+        assert isinstance(obj, str)
+        return obj.decode('utf-8')
+
+    def newbytes(self, obj):
+        assert isinstance(obj, str)
         return obj
 
     def unpackiterable(self, itr):
         return list(itr)
 
     def is_true(self, obj):
+        if isinstance(obj, tuple) and isinstance(obj[0], py.code.Source):
+            raise ValueError('bool(appexec object) unknown')
         return bool(obj)
 
     def is_none(self, obj):
@@ -100,6 +92,12 @@ class TinyObjSpace(object):
 
     def str_w(self, w_str):
         return w_str
+
+    def utf8_w(self, w_utf8):
+        return w_utf8
+
+    def bytes_w(self, w_bytes):
+        return w_bytes
 
     def newdict(self, module=None):
         return {}

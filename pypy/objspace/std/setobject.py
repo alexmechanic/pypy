@@ -4,9 +4,10 @@ from pypy.interpreter.error import OperationError, oefmt
 from pypy.interpreter.signature import Signature
 from pypy.interpreter.typedef import TypeDef
 from pypy.objspace.std.bytesobject import W_BytesObject
-from pypy.objspace.std.intobject import W_IntObject
+from pypy.objspace.std.listobject import is_plain_int1, plain_int_w
 from pypy.objspace.std.unicodeobject import W_UnicodeObject
-from pypy.objspace.std.util import IDTAG_SPECIAL, IDTAG_SHIFT
+from pypy.objspace.std.util import IDTAG_SPECIAL, IDTAG_SHIFT, \
+    generic_alias_class_getitem
 
 from rpython.rlib.objectmodel import r_dict
 from rpython.rlib.objectmodel import iterkeys_with_hash, contains_with_hash
@@ -166,13 +167,6 @@ class W_BaseSetObject(W_Root):
 
     def descr_repr(self, space):
         return setrepr(space, space.get_objects_in_repr(), self)
-
-    def descr_cmp(self, space, w_other):
-        if space.is_w(space.type(self), space.type(w_other)):
-            # hack hack until we get the expected result
-            raise oefmt(space.w_TypeError, "cannot compare sets using cmp()")
-        else:
-            return space.w_NotImplemented
 
     def descr_eq(self, space, w_other):
         if isinstance(w_other, W_BaseSetObject):
@@ -416,12 +410,7 @@ class W_SetObject(W_BaseSetObject):
 
     def _newobj(self, space, w_iterable):
         """Make a new set by taking ownership of 'w_iterable'."""
-        if type(self) is W_SetObject:
-            return W_SetObject(space, w_iterable)
-        w_type = space.type(self)
-        w_obj = space.allocate_instance(W_SetObject, w_type)
-        W_SetObject.__init__(w_obj, space, w_iterable)
-        return w_obj
+        return W_SetObject(space, w_iterable)
 
     @staticmethod
     def descr_new(space, w_settype, __args__):
@@ -539,7 +528,9 @@ Build an unordered collection.""",
     __init__ = gateway.interp2app(W_SetObject.descr_init),
     __repr__ = gateway.interp2app(W_SetObject.descr_repr),
     __hash__ = None,
-    __cmp__ = gateway.interp2app(W_SetObject.descr_cmp),
+
+    __class_getitem__ = gateway.interp2app(
+        generic_alias_class_getitem, as_classmethod=True),
 
     # comparison operators
     __eq__ = gateway.interp2app(W_SetObject.descr_eq),
@@ -594,12 +585,13 @@ set_typedef = W_SetObject.typedef
 
 
 class W_FrozensetObject(W_BaseSetObject):
-    hash = 0
+    DEFAULT_HASH = -1
+    hash = DEFAULT_HASH
 
     def _cleanup_(self):
         # in case there are frozenset objects existing during
         # translation, make sure we don't translate a cached hash
-        self.hash = 0
+        self.hash = self.DEFAULT_HASH
 
     def is_w(self, space, w_other):
         if not isinstance(w_other, W_FrozensetObject):
@@ -620,12 +612,7 @@ class W_FrozensetObject(W_BaseSetObject):
 
     def _newobj(self, space, w_iterable):
         """Make a new frozenset by taking ownership of 'w_iterable'."""
-        if type(self) is W_FrozensetObject:
-            return W_FrozensetObject(space, w_iterable)
-        w_type = space.type(self)
-        w_obj = space.allocate_instance(W_FrozensetObject, w_type)
-        W_FrozensetObject.__init__(w_obj, space, w_iterable)
-        return w_obj
+        return W_FrozensetObject(space, w_iterable)
 
     @staticmethod
     def descr_new2(space, w_frozensettype, w_iterable=None):
@@ -637,11 +624,12 @@ class W_FrozensetObject(W_BaseSetObject):
         return w_obj
 
     def descr_hash(self, space):
-        multi = r_uint(1822399083) + r_uint(1822399083) + 1
-        if self.hash != 0:
+        if self.hash != -1:
             return space.newint(self.hash)
+        multi = r_uint(1822399083) + r_uint(1822399083) + 1
         hash = r_uint(1927868237)
         hash *= r_uint(self.length() + 1)
+        # jit driver, maybe?
         w_iterator = self.iter()
         while True:
             w_item = w_iterator.next_entry()
@@ -650,16 +638,17 @@ class W_FrozensetObject(W_BaseSetObject):
             h = space.hash_w(w_item)
             value = (r_uint(h ^ (h << 16) ^ 89869747)  * multi)
             hash = hash ^ value
+        hash ^= (hash >> 11) ^ (hash >> 25)
         hash = hash * 69069 + 907133923
-        if hash == 0:
-            hash = 590923713
         hash = intmask(hash)
+        if hash == -1:
+            hash = 590923713
         self.hash = hash
 
         return space.newint(hash)
 
     def cpyext_add_frozen(self, w_key):
-        if self.hash != 0:
+        if self.hash != self.DEFAULT_HASH:
             return False
         self.add(w_key)
         return True
@@ -671,7 +660,9 @@ Build an immutable unordered collection.""",
     __new__ = gateway.interp2app(W_FrozensetObject.descr_new2),
     __repr__ = gateway.interp2app(W_FrozensetObject.descr_repr),
     __hash__ = gateway.interp2app(W_FrozensetObject.descr_hash),
-    __cmp__ = gateway.interp2app(W_FrozensetObject.descr_cmp),
+
+    __class_getitem__ = gateway.interp2app(
+        generic_alias_class_getitem, as_classmethod=True),
 
     # comparison operators
     __eq__ = gateway.interp2app(W_FrozensetObject.descr_eq),
@@ -825,7 +816,7 @@ class EmptySetStrategy(SetStrategy):
         return clone
 
     def add(self, w_set, w_key):
-        if type(w_key) is W_IntObject:
+        if is_plain_int1(w_key):
             strategy = self.space.fromcache(IntegerSetStrategy)
         elif type(w_key) is W_BytesObject:
             strategy = self.space.fromcache(BytesSetStrategy)
@@ -1349,7 +1340,7 @@ class IntegerSetStrategy(AbstractUnwrappedSetStrategy, SetStrategy):
         return self.unerase(w_set.sstorage).keys()
 
     def is_correct_type(self, w_key):
-        return type(w_key) is W_IntObject
+        return is_plain_int1(w_key)
 
     def may_contain_equal_elements(self, strategy):
         if strategy is self.space.fromcache(BytesSetStrategy):
@@ -1363,7 +1354,7 @@ class IntegerSetStrategy(AbstractUnwrappedSetStrategy, SetStrategy):
         return True
 
     def unwrap(self, w_item):
-        return self.space.int_w(w_item)
+        return plain_int_w(self.space, w_item)
 
     def wrap(self, item):
         return self.space.newint(item)
@@ -1593,10 +1584,23 @@ class W_SetIterObject(W_Root):
             return w_key
         raise OperationError(space.w_StopIteration, space.w_None)
 
+    def descr_reduce(self, space):
+        # copy the iterator state
+        w_set = self.iterimplementation.setimplementation
+        w_clone = W_SetIterObject(space, w_set.iter())
+        # spool until we have the same pos
+        for x in xrange(self.iterimplementation.pos):
+            w_clone.descr_next(space)
+        w_res = space.call_function(space.w_list, w_clone)
+        w_iter = space.builtin.get('iter')
+        return space.newtuple([w_iter, space.newtuple([w_res])])
+
+
 W_SetIterObject.typedef = TypeDef("setiterator",
     __length_hint__ = gateway.interp2app(W_SetIterObject.descr_length_hint),
     __iter__ = gateway.interp2app(W_SetIterObject.descr_iter),
-    next = gateway.interp2app(W_SetIterObject.descr_next)
+    __next__ = gateway.interp2app(W_SetIterObject.descr_next),
+    __reduce__ = gateway.interp2app(W_SetIterObject.descr_reduce),
     )
 setiter_typedef = W_SetIterObject.typedef
 
@@ -1655,7 +1659,7 @@ def _pick_correct_strategy_unroll(space, w_set, w_iterable):
     iterable_w = space.listview(w_iterable)
     # check for integers
     for w_item in iterable_w:
-        if type(w_item) is not W_IntObject:
+        if not is_plain_int1(w_item):
             break
     else:
         w_set.strategy = space.fromcache(IntegerSetStrategy)
@@ -1743,7 +1747,13 @@ app = gateway.applevel("""
             return '%s(...)' % (s.__class__.__name__,)
         currently_in_repr[s] = 1
         try:
-            return '%s(%s)' % (s.__class__.__name__, [x for x in s])
+            if not s:
+                return '%s()' % (s.__class__.__name__,)
+            listrepr = repr([x for x in s])
+            if type(s) is set:
+                return '{%s}' % (listrepr[1:-1],)
+            else:
+                return '%s({%s})' % (s.__class__.__name__, listrepr[1:-1])
         finally:
             try:
                 del currently_in_repr[s]

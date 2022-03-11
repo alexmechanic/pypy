@@ -46,9 +46,9 @@ class AppTestDATATYPES:
         assert not c.get_bool(); assert not c.get_bool_cr(); assert not c.get_bool_r()
 
         # reading char types
-        assert c.m_char  == 'a'
-        assert c.m_schar == 'b'
-        assert c.m_uchar == 'c'
+        assert c.m_char  == b'a'
+        assert c.m_schar == b'b'
+        assert c.m_uchar == b'c'
         assert type(c.m_wchar) == pyunicode
         assert c.m_wchar == u'D'
         assert type(c.m_char16) == pyunicode
@@ -191,22 +191,22 @@ class AppTestDATATYPES:
         raises(ValueError, c.set_bool, 10)
 
         # char types through functions
-        c.set_char('c');   assert c.get_char()  == 'c'
-        c.set_uchar('e');  assert c.get_uchar() == 'e'
-        c.set_wchar(u'F'); assert c.get_wchar() == u'F'
-        assert type(c.get_wchar()) == pyunicode
+        c.set_char('c');   assert c.get_char()  == b'c'
+        c.set_char(b'b');  assert c.get_char()  == b'b'
+        c.set_uchar('e');  assert c.get_uchar() == b'e'
+        c.set_uchar(b'd'); assert c.get_uchar() == b'd'
         c.set_char16(u'\u00f2');     assert c.get_char16() == u'\u00f2'
         c.set_char32(u'\U0001f31c'); assert c.get_char32() == u'\U0001f31c'
 
         # char types through data members
-        c.m_char = 'b';    assert c.get_char()  ==     'b'
-        c.m_char = 40;     assert c.get_char()  == chr(40)
-        c.set_char('c');   assert c.m_char      ==     'c'
-        c.set_char(41);    assert c.m_char      == chr(41)
-        c.m_uchar = 'd';   assert c.get_uchar() ==     'd'
-        c.m_uchar = 42;    assert c.get_uchar() == chr(42)
-        c.set_uchar('e');  assert c.m_uchar     ==     'e'
-        c.set_uchar(43);   assert c.m_uchar     == chr(43)
+        c.m_char = 'b';    assert c.get_char()  == b'b'
+        c.m_char = 40;     assert c.get_char()  == str.encode(chr(40))
+        c.set_char('c');   assert c.m_char      == b'c'
+        c.set_char(41);    assert c.m_char      == str.encode(chr(41))
+        c.m_uchar = 'd';   assert c.get_uchar() == b'd'
+        c.m_uchar = 42;    assert c.get_uchar() == str.encode(chr(42))
+        c.set_uchar('e');  assert c.m_uchar     == b'e'
+        c.set_uchar(43);   assert c.m_uchar     == str.encode(chr(43))
         c.m_wchar = u'G';  assert c.get_wchar() ==    u'G'
         c.set_wchar(u'H'); assert c.m_wchar     ==    u'H'
         c.m_char16 = u'\u00f3';  assert c.get_char16() == u'\u00f3'
@@ -339,10 +339,10 @@ class AppTestDATATYPES:
         assert isinstance(c, CppyyTestData)
 
         # char types
-        assert CppyyTestData.s_char     == 'c'
-        assert c.s_char                 == 'c'
-        assert CppyyTestData.s_uchar    == 'u'
-        assert c.s_uchar                == 'u'
+        assert CppyyTestData.s_char    == b'c'
+        assert c.s_char                == b'c'
+        assert c.s_uchar               == b'u'
+        assert CppyyTestData.s_uchar   == b'u'
         assert CppyyTestData.s_wchar    == u'U'
         assert c.s_wchar                == u'U'
         assert CppyyTestData.s_char16   == u'\u6c29'
@@ -409,14 +409,14 @@ class AppTestDATATYPES:
         assert isinstance(c, CppyyTestData)
 
         # char types
-        CppyyTestData.s_char             = 'a'
-        assert c.s_char                 == 'a'
-        c.s_char                         = 'b'
-        assert CppyyTestData.s_char     == 'b'
-        CppyyTestData.s_uchar            = 'c'
-        assert c.s_uchar                == 'c'
-        c.s_uchar                        = 'd'
-        assert CppyyTestData.s_uchar    == 'd'
+        CppyyTestData.s_char           =  'a'
+        assert c.s_char               == b'a'
+        c.s_char                       =  'b'
+        assert CppyyTestData.s_char   == b'b'
+        CppyyTestData.s_uchar          =  'c'
+        assert c.s_uchar              == b'c'
+        c.s_uchar                      =  'd'
+        assert CppyyTestData.s_uchar  == b'd'
         raises(ValueError, setattr, CppyyTestData, 's_uchar', -1)
         raises(ValueError, setattr, c,             's_uchar', -1)
         CppyyTestData.s_wchar            = u'K'

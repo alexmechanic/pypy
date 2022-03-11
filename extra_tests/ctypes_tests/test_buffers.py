@@ -6,17 +6,12 @@ def test_buffer():
     b = create_string_buffer(32)
     assert len(b) == 32
     assert sizeof(b) == 32 * sizeof(c_char)
-    assert type(b[0]) is str
-
-    b = create_string_buffer(33L)
-    assert len(b) == 33
-    assert sizeof(b) == 33 * sizeof(c_char)
-    assert type(b[0]) is str
+    assert type(b[0]) is bytes
 
     b = create_string_buffer(b"abc")
     assert len(b) == 4 # trailing nul char
     assert sizeof(b) == 4 * sizeof(c_char)
-    assert type(b[0]) is str
+    assert type(b[0]) is bytes
     assert b[0] == b"a"
     assert b[:] == b"abc\0"
 
@@ -55,15 +50,15 @@ s_ulong = {4: 'L', 8: 'Q'}[sizeof(c_long)]
     (c_ubyte, "<B"),
     (c_short, "<h"),
     (c_ushort, "<H"),
-    (c_long, "<" + s_long),
-    (c_ulong, "<" + s_ulong),
+    (c_long, f"<{s_long}"),
+    (c_ulong, f"<{s_ulong}"),
     (c_float, "<f"),
     (c_double, "<d"),
     (c_bool, "<?"),
     (py_object, "<O"),
     ## pointers
     (POINTER(c_byte), "&<b"),
-    (POINTER(POINTER(c_long)), "&&<" + s_long),
+    (POINTER(POINTER(c_long)), f"&&<{s_long}"),
     ## arrays and pointers
     (c_double * 4, "<d"),
     (c_float * 4 * 3 * 2, "<f"),

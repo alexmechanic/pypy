@@ -120,7 +120,7 @@ class Field(object):
             # bitfield member, use direct access
             return obj._buffer.__getattr__(self.name)
         elif not isinstance(obj, _CData):
-            raise(TypeError, 'not a ctype instance')
+            raise(TypeError, 'not a ctype instance') 
         else:
             fieldtype = self.ctype
             offset = self.num
@@ -145,7 +145,7 @@ class Field(object):
             dest = obj._buffer.fieldaddress(self.name)
             memmove(dest, arg, fieldtype._fficompositesize_)
         elif not isinstance(obj, _CData):
-            raise(TypeError, 'not a ctype instance')
+            raise(TypeError, 'not a ctype instance') 
         else:
             obj._buffer.__setattr__(self.name, arg)
 
@@ -221,7 +221,7 @@ class StructOrUnionMeta(_CDataMeta):
         if isinstance(address, _rawffi.StructureInstance):
             address = address.buffer
         # fix the address: turn it into as unsigned, in case it is negative
-        address = address & (sys.maxint * 2 + 1)
+        address = address & (sys.maxsize * 2 + 1)
         instance.__dict__['_buffer'] = self._ffistruct_.fromaddress(address)
         return instance
 
@@ -237,7 +237,7 @@ class StructOrUnionMeta(_CDataMeta):
         if isinstance(value, tuple):
             try:
                 value = self(*value)
-            except Exception, e:
+            except Exception as e:
                 # XXX CPython does not even respect the exception type
                 raise RuntimeError("(%s) %s: %s" % (self.__name__, type(e), e))
         return _CDataMeta.from_param(self, value)
@@ -277,8 +277,7 @@ class StructOrUnionMeta(_CDataMeta):
             cum_size += self._ffistruct_.fieldsize(name)
         return 'T{' + ''.join(flds) + '}'
 
-class StructOrUnion(_CData):
-    __metaclass__ = StructOrUnionMeta
+class StructOrUnion(_CData, metaclass=StructOrUnionMeta):
 
     def __new__(cls, *args, **kwds):
         from _ctypes import union
@@ -324,9 +323,8 @@ class StructOrUnion(_CData):
         memmove(addr, origin, self._fficompositesize_)
 
     def _to_ffi_param(self):
-        newparam = StructOrUnion.__new__(type(self))
-        self._copy_to(newparam._buffer.buffer)
-        return newparam._buffer
+        # Do not copy, like CPython
+        return self._buffer
 
     def __buffer__(self, flags):
         fmt = type(self)._getformat()
@@ -337,5 +335,5 @@ class StructureMeta(StructOrUnionMeta):
     _is_union = False
 
 
-class Structure(StructOrUnion):
-    __metaclass__ = StructureMeta
+class Structure(StructOrUnion, metaclass=StructureMeta):
+    pass

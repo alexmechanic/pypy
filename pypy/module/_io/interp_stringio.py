@@ -132,8 +132,11 @@ class W_StringIO(W_TextIOBase):
 
         if space.is_w(w_newline, space.w_None):
             newline = None
-        else:
+        elif space.isinstance_w(w_newline, space.w_unicode):
             newline = space.utf8_w(w_newline)
+        else:
+            raise oefmt(space.w_TypeError,
+                 "newline must be str or None, not %T", w_newline)
 
         if (newline is not None and newline != "" and newline != "\n" and
                 newline != "\r" and newline != "\r\n"):
@@ -173,7 +176,7 @@ class W_StringIO(W_TextIOBase):
 
     def descr_getstate(self, space):
         w_initialval = self.getvalue_w(space)
-        w_dict = space.call_method(self.w_dict, "copy")
+        w_dict = space.call_method(self.getdict(space), "copy")
         readnl = self.readnl
         if readnl is None:
             w_readnl = space.w_None
@@ -213,7 +216,7 @@ class W_StringIO(W_TextIOBase):
                     "fourth item of state should be a dict, got a %T", w_dict)
             # Alternatively, we could replace the internal dictionary
             # completely. However, it seems more practical to just update it.
-            space.call_method(self.w_dict, "update", w_dict)
+            space.call_method(self.getdict(space), "update", w_dict)
 
     def _check_closed(self, space, message=None):
         if self.state == CLOSED:
@@ -443,6 +446,10 @@ class W_StringIO(W_TextIOBase):
     def close_w(self, space):
         self.buf = None
         self.state = CLOSED
+
+    def needs_finalizer(self):
+        # 'self.buf = None' is not necessary when the object goes away
+        return type(self) is not W_StringIO
 
     def closed_get_w(self, space):
         return space.newbool(self.state == CLOSED)

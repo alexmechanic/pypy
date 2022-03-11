@@ -1,6 +1,9 @@
 #ifndef Py_PYTHON_H
 #define Py_PYTHON_H
 
+#include "patchlevel.h"
+#include <pyconfig.h>
+
 /* Compat stuff */
 #ifdef __GNUC__
 #define _GNU_SOURCE 1
@@ -11,13 +14,7 @@
 # include <math.h>
 # include <errno.h>
 # include <unistd.h>
-# define Py_DEPRECATED(VERSION_UNUSED) __attribute__((__deprecated__))
-# define PyAPI_FUNC(RTYPE) __attribute__((visibility("default"))) RTYPE
-# define PyAPI_DATA(RTYPE) extern PyAPI_FUNC(RTYPE)
-# define Py_LOCAL_INLINE(type) static inline type
 #else
-# define MS_WIN32 1
-# define MS_WINDOWS 1
 # ifdef _MSC_VER
 #  include <crtdefs.h>
 # endif
@@ -26,15 +23,6 @@
 # endif
 # include <io.h>
 # include <sys/types.h>   /* for 'off_t' */
-# define Py_DEPRECATED(VERSION_UNUSED)
-# ifdef Py_BUILD_CORE
-#  define PyAPI_FUNC(RTYPE) __declspec(dllexport) RTYPE
-#  define PyAPI_DATA(RTYPE) extern __declspec(dllexport) RTYPE
-# else
-#  define PyAPI_FUNC(RTYPE) __declspec(dllimport) RTYPE
-#  define PyAPI_DATA(RTYPE) extern __declspec(dllimport) RTYPE
-# endif
-# define Py_LOCAL_INLINE(type) static __inline type __fastcall
 #endif
 
 /* Deprecated DL_IMPORT and DL_EXPORT macros */
@@ -59,27 +47,19 @@
 
 #define Py_USING_UNICODE
 
-/* Convert a possibly signed character to a nonnegative int */
-/* XXX This assumes characters are 8 bits wide */
-#ifdef __CHAR_UNSIGNED__
-#define Py_CHARMASK(c)		(c)
-#else
-#define Py_CHARMASK(c)		((unsigned char)((c) & 0xff))
-#endif
-
 #define statichere static
 
 #define Py_MEMCPY memcpy
+#include "pyport.h"
 
 #include "pypy_macros.h"
-
-#include "patchlevel.h"
-#include "pyconfig.h"
+#include "pymacro.h"
 
 #include "object.h"
+#include "typeslots.h"
 #include "abstract.h"
 #include "pymath.h"
-#include "pyport.h"
+#include "pytime.h"
 #include "warnings.h"
 
 #include <stdarg.h>
@@ -89,6 +69,7 @@
 #include <locale.h>
 #include <ctype.h>
 
+#include "pyhash.h"
 #include "boolobject.h"
 #include "floatobject.h"
 #include "complexobject.h"
@@ -96,17 +77,17 @@
 #include "funcobject.h"
 #include "code.h"
 
+#include "moduleobject.h"
 #include "modsupport.h"
 #include "pythonrun.h"
 #include "pyerrors.h"
 #include "sysmodule.h"
 #include "bytearrayobject.h"
-#include "stringobject.h"
 #include "descrobject.h"
 #include "tupleobject.h"
 #include "dictobject.h"
+#include "longobject.h"
 #include "setobject.h"
-#include "intobject.h"
 #include "listobject.h"
 #include "longobject.h"
 #include "unicodeobject.h"
@@ -115,17 +96,19 @@
 #include "memoryobject.h"
 #include "eval.h"
 #include "pymem.h"
-#include "pycobject.h"
 #include "pycapsule.h"
-#include "bufferobject.h"
 #include "bytesobject.h"
 #include "sliceobject.h"
+#include "genobject.h"
 #include "datetime.h"
+#include "structseq.h"
 #include "pystate.h"
 #include "fileobject.h"
 #include "pysignals.h"
 #include "pythread.h"
 #include "traceback.h"
+#include "pylifecycle.h"
+#include "genericaliasobject.h"
 
 /* Missing definitions */
 #include "missing.h"
@@ -155,5 +138,7 @@ extern "C" {
 /* PyPy does not implement --with-fpectl */
 #define PyFPE_START_PROTECT(err_string, leave_stmt)
 #define PyFPE_END_PROTECT(v)
+
+#include "pystrtod.h"
 
 #endif

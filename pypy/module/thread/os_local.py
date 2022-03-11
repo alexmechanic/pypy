@@ -14,6 +14,7 @@ class WRefShrinkList(AbstractShrinkList):
 
 
 ExecutionContext._thread_local_objs = None
+ExecutionContext._sentinel_lock = None
 
 
 class Local(W_Root):
@@ -86,7 +87,7 @@ class Local(W_Root):
         Local.__init__(local, space, __args__)
         return local
 
-Local.typedef = TypeDef("thread._local",
+Local.typedef = TypeDef("_thread._local",
                         __doc__ = "Thread-local data",
                         __new__ = interp2app(Local.descr_local__new__.im_func),
                         __dict__ = GetSetProperty(descr_get_dict, cls=Local),
@@ -94,6 +95,10 @@ Local.typedef = TypeDef("thread._local",
                         )
 
 def thread_is_stopping(ec):
+    sentinel_lock = ec._sentinel_lock
+    if sentinel_lock is not None:
+        if sentinel_lock.lock.is_acquired():
+            sentinel_lock.descr_lock_release(ec.space)
     tlobjs = ec._thread_local_objs
     if tlobjs is None:
         return

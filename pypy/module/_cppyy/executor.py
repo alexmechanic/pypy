@@ -167,6 +167,11 @@ class CStringExecutor(Executor):
         if ccp == rffi.cast(rffi.CCHARP, 0):
             return space.newbytes("")
         result = rffi.charp2str(ccp)   # TODO: make it a choice to free
+        # debatable whether this should be newtext or newbytes; they are bytes
+        # but will be more likely used as text after binding ... probably need
+        # to make this configurable on a per-function bases (same as the old
+        # char* v.s. byte* problem)
+        return space.newtext(result)
         return space.newtext(result)
 
 

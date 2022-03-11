@@ -256,7 +256,7 @@ class AppTestFfi:
         try:
             _rawffi.CDLL("xxxxx_this_name_does_not_exist_xxxxx")
         except OSError as e:
-            print e
+            print(e)
             assert str(e).startswith(
                 "Cannot load library xxxxx_this_name_does_not_exist_xxxxx: ")
         else:
@@ -310,7 +310,8 @@ class AppTestFfi:
             intptr = B(1)
             intptr[0] = i
             res = get_char(dupaptr, intptr)
-            assert res[0] == 'dupa'[i]
+            char = b'dupa'[i:i+1]
+            assert res[0] == char
             intptr.free()
         dupaptr.free()
         dupa.free()
@@ -373,7 +374,7 @@ class AppTestFfi:
         a = A(6, u'xx\x00\x00xx')
         for i in (-1, 6):
             res = _rawffi.wcharp2unicode(a.buffer, i)
-            assert isinstance(res, unicode)
+            assert isinstance(res, str)
             assert res == u'xx'
         a.free()
 
@@ -383,8 +384,12 @@ class AppTestFfi:
         a = A(10, b'x'*10)
         _rawffi.rawstring2charp(a.buffer, b"foobar")
         assert b''.join([a[i] for i in range(10)]) == b"foobarxxxx"
-        _rawffi.rawstring2charp(a.buffer, buffer("baz"))
+        _rawffi.rawstring2charp(a.buffer, memoryview(b"baz"))
         assert b''.join([a[i] for i in range(10)]) == b"bazbarxxxx"
+        _rawffi.rawstring2charp(a.buffer, memoryview(b"ABCDEF"), 2)
+        assert b''.join([a[i] for i in range(10)]) == b"CDEFarxxxx"
+        _rawffi.rawstring2charp(a.buffer, memoryview(b"ZYXWVU"), 2, 3)
+        assert b''.join([a[i] for i in range(10)]) == b"XWVFarxxxx"
         a.free()
 
     def test_raw_callable(self):
@@ -694,7 +699,6 @@ class AppTestFfi:
         raises(ValueError, "lib.ptr('get_char', [], 'x')")
         raises(ValueError, "_rawffi.Structure(['x1', 'xx'])")
         raises(ValueError, _rawffi.Structure, [('x1', 'xx')])
-        raises(TypeError, _rawffi.Structure, [(u'\xe9', 'l')])
         raises(ValueError, "_rawffi.Array('xx')")
 
     def test_longs_ulongs(self):
@@ -780,7 +784,7 @@ class AppTestFfi:
 
     def test_raising_callback(self):
         import _rawffi, sys
-        from StringIO import StringIO
+        from io import StringIO
         lib = _rawffi.CDLL(self.lib_name)
         err = StringIO()
         orig = sys.stderr
@@ -798,7 +802,7 @@ class AppTestFfi:
             val = err.getvalue()
             assert 'ZeroDivisionError' in val
             assert 'callback' in val
-            assert res[0] == 0L
+            assert res[0] == 0
         finally:
             sys.stderr = orig
 
@@ -818,7 +822,7 @@ class AppTestFfi:
 
     def test_sizes_and_alignments(self):
         import _rawffi
-        for k, (s, a) in self.sizes_and_alignments.iteritems():
+        for k, (s, a) in self.sizes_and_alignments.items():
             assert _rawffi.sizeof(k) == s
             assert _rawffi.alignment(k) == a
 
@@ -930,7 +934,7 @@ class AppTestFfi:
         a = _rawffi.Array('b')(1)
         a[0] = -5
         assert a[0] == -5
-        a[0] = 123L
+        a[0] = 123
         assert a[0] == 123
         a[0] = 0x97817182ab128111111111111171817d042
         assert a[0] == 0x42
@@ -943,7 +947,7 @@ class AppTestFfi:
         a.free()
 
         a = _rawffi.Array('B')(1)
-        a[0] = 123L
+        a[0] = 123
         assert a[0] == 123
         a[0] = 0x18329b1718b97d89b7198db817d042
         assert a[0] == 0x42
@@ -956,7 +960,7 @@ class AppTestFfi:
         a.free()
 
         a = _rawffi.Array('h')(1)
-        a[0] = 123L
+        a[0] = 123
         assert a[0] == 123
         a[0] = 0x9112cbc91bd91db19aaaaaaaaaaaaaa8170d42
         assert a[0] == 0x0d42
@@ -969,7 +973,7 @@ class AppTestFfi:
         a.free()
 
         a = _rawffi.Array('H')(1)
-        a[0] = 123L
+        a[0] = 123
         assert a[0] == 123
         a[0] = 0xeeeeeeeeeeeeeeeeeeeeeeeeeeeee817d042
         assert a[0] == 0xd042
@@ -979,7 +983,7 @@ class AppTestFfi:
 
         maxptr = (256 ** struct.calcsize("P")) - 1
         a = _rawffi.Array('P')(1)
-        a[0] = 123L
+        a[0] = 123
         assert a[0] == 123
         a[0] = 0xeeeeeeeeeeeeeeeeeeeeeeeeeeeee817d042
         assert a[0] == 0xeeeeeeeeeeeeeeeeeeeeeeeeeeeee817d042 & maxptr
@@ -1035,7 +1039,7 @@ class AppTestFfi:
         try:
             f()
         except ValueError as e:
-            assert "Procedure called with not enough arguments" in e.message
+            assert "Procedure called with not enough arguments" in str(e)
         else:
             assert 0, "Did not raise"
 
@@ -1046,7 +1050,7 @@ class AppTestFfi:
         try:
             f(arg)
         except ValueError as e:
-            assert "Procedure called with too many arguments" in e.message
+            assert "Procedure called with too many arguments" in str(e)
         else:
             assert 0, "Did not raise"
         arg.free()
@@ -1134,16 +1138,16 @@ class AppTestFfi:
         import _rawffi
         S = _rawffi.Structure((40, 1))
         s = S(autofree=True)
-        b = buffer(s)
+        b = memoryview(s)
         assert len(b) == 40
-        b[4] = b'X'
+        b[4] = ord(b'X')
         b[:3] = b'ABC'
         assert b[:6] == b'ABC\x00X\x00'
 
         A = _rawffi.Array('c')
         a = A(10, autofree=True)
         a[3] = b'x'
-        b = buffer(a)
+        b = memoryview(a)
         assert len(b) == 10
         assert b[3] == b'x'
         b[6] = b'y'
@@ -1162,11 +1166,6 @@ class AppTestFfi:
         import _rawffi
         S = _rawffi.Structure((40, 1))
         s = S(autofree=True)
-        addr = buffer(s)._pypy_raw_address()
-        assert type(addr) is int
-        assert buffer(s)._pypy_raw_address() == addr
-        assert buffer(s, 10)._pypy_raw_address() == addr + 10
-
         addr = memoryview(s)._pypy_raw_address()
         assert type(addr) is int
         assert memoryview(s)._pypy_raw_address() == addr
@@ -1227,6 +1226,17 @@ class AppTestFfi:
         z = _rawffi.get_last_error()
         assert z == 43
         arg.free()
+
+    def test_char_array_int(self):
+        import _rawffi
+        A = _rawffi.Array('c')
+        a = A(1)
+        a[0] = b'a'
+        assert a[0] == b'a'
+        # also accept int but return bytestring
+        a[0] = 100
+        assert a[0] == b'd'
+        a.free()
 
     def test_cdll_name(self):
         import _rawffi

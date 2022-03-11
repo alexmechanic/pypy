@@ -17,21 +17,24 @@ class AppTestThreadSignal(GenericTestThread):
     spaceconfig = dict(usemodules=['__pypy__', 'thread', 'signal', 'time'])
 
     def test_exit_twice(self):
-        import __pypy__, thread
+        import __pypy__, _thread
         __pypy__.thread._signals_exit()
         try:
-            raises(thread.error, __pypy__.thread._signals_exit)
+            raises(_thread.error, __pypy__.thread._signals_exit)
         finally:
             __pypy__.thread._signals_enter()
 
     def test_enable_signals(self):
-        import __pypy__, thread, signal, time, sys
+        if not self.runappdirect:
+            skip("test is flaky when untranslated on bencher4 and aarch64")
+
+        import __pypy__, _thread, signal, time, sys
 
         def subthread():
             print('subthread started')
             try:
                 with __pypy__.thread.signals_enabled:
-                    thread.interrupt_main()
+                    _thread.interrupt_main()
                     for i in range(10):
                         print('x')
                         time.sleep(0.25)
@@ -47,7 +50,7 @@ class AppTestThreadSignal(GenericTestThread):
         if sys.platform.startswith('win'):
             # Windows seems to hang on _setmode when the first print comes from
             # a thread, so make sure we've initialized io
-            sys.stdout
+            sys.stderr
 
         for i in range(10):
             __pypy__.thread._signals_exit()
@@ -55,7 +58,7 @@ class AppTestThreadSignal(GenericTestThread):
                 done = []
                 interrupted = []
                 print('--- start ---')
-                thread.start_new_thread(subthread, ())
+                _thread.start_new_thread(subthread, ())
                 for j in range(30):
                     if len(done): break
                     print('.')
@@ -69,19 +72,19 @@ class AppTestThreadSignal(GenericTestThread):
 
     def test_thread_fork_signals(self):
         import __pypy__
-        import os, thread, signal
+        import os, _thread, signal, time
 
         if not hasattr(os, 'fork'):
             skip("No fork on this platform")
 
         def fork():
+            time.sleep(0.1)
             with __pypy__.thread.signals_enabled:
                 return os.fork()
 
         def threadfunction():
             pid = fork()
             if pid == 0:
-                print('in child')
                 # signal() only works from the 'main' thread
                 signal.signal(signal.SIGUSR1, signal.SIG_IGN)
                 os._exit(42)
@@ -91,7 +94,8 @@ class AppTestThreadSignal(GenericTestThread):
                 feedback.append(exitcode)
 
         feedback = []
-        thread.start_new_thread(threadfunction, ())
+        _thread.start_new_thread(threadfunction, ())
+        time.sleep(3)
         self.waitfor(lambda: feedback)
         # if 0, an (unraisable) exception was raised from the forked thread.
         # if 9, process was killed by timer.
@@ -103,29 +107,28 @@ class AppTestThreadSignalLock:
     spaceconfig = dict(usemodules=['__pypy__', 'thread', 'signal'])
 
     def setup_class(cls):
-        if (not cls.runappdirect or
-                '__pypy__' not in sys.builtin_module_names):
+        if (not cls.runappdirect):
             import py
             py.test.skip("this is only a test for -A runs on top of pypy")
 
     def test_enable_signals(self):
-        import __pypy__, thread, time
+        import __pypy__, _thread, time
 
         interrupted = []
-        lock = thread.allocate_lock()
+        lock = _thread.allocate_lock()
         lock.acquire()
 
         def subthread():
             try:
                 time.sleep(0.5)
                 with __pypy__.thread.signals_enabled:
-                    thread.interrupt_main()
+                    _thread.interrupt_main()
             except BaseException as e:
                 interrupted.append(e)
             finally:
                 lock.release()
 
-        thread.start_new_thread(subthread, ())
+        _thread.start_new_thread(subthread, ())
         lock.acquire()
         assert len(interrupted) == 1
         assert 'KeyboardInterrupt' in interrupted[0].__class__.__name__

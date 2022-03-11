@@ -15,28 +15,33 @@ all_modules = [p.basename for p in modulepath.listdir()
                and not p.basename.startswith('test')]
 
 essential_modules = set([
-    "exceptions", "_file", "sys", "__builtin__", "posix", "_warnings",
-    "itertools"
+    "exceptions", "_io", "sys", "builtins", "posix", "_warnings",
+    "itertools", "_frozen_importlib", "operator", "_locale", "struct",
+    "thread", "__pypy__", "zipimport", "_opcode",
 ])
+if sys.platform == "win32":
+    essential_modules.add("_winreg")
 
 default_modules = essential_modules.copy()
 default_modules.update([
-    "_codecs", "gc", "_weakref", "marshal", "errno", "imp", "math", "cmath",
-    "_sre", "_pickle_support", "operator", "parser", "symbol", "token", "_ast",
-    "_io", "_random", "__pypy__", "_testing", "time"
+    "_codecs", "atexit", "gc", "_weakref", "marshal", "errno", "imp",
+    "itertools", "math", "cmath", "_sre", "_pickle_support",
+    "parser", "symbol", "token", "_ast", "_random",
+    "_string", "_testing", "time", "_abc",
 ])
 
 
 # --allworkingmodules
 working_modules = default_modules.copy()
 working_modules.update([
-    "_socket", "unicodedata", "mmap", "fcntl", "_locale", "pwd",
-    "select", "zipimport", "_lsprof", "signal", "_rawffi", "termios",
-    "zlib", "bz2", "struct", "_md5", "_sha", "_minimal_curses",
-    "cStringIO", "thread", "itertools", "pyexpat", "cpyext", "array",
+    "_socket", "unicodedata", "mmap", "fcntl", "pwd",
+    "select", "_lsprof", "signal", "_rawffi", "termios",
+    "zlib", "bz2", "_md5", "_minimal_curses",
+    "itertools", "pyexpat", "cpyext", "array",
     "binascii", "_multiprocessing", '_warnings', "_collections",
-    "_multibytecodec", "micronumpy", "_continuation", "_cffi_backend",
-    "_csv", "_cppyy", "_pypyjson", "_jitlog",
+    "_multibytecodec", "_continuation", "_cffi_backend",
+    "_csv", "_pypyjson", "_posixsubprocess", "_cppyy", # "micronumpy",
+    "_jitlog", "_hpy_universal"
     # "_hashlib", "crypt"
 ])
 
@@ -47,8 +52,8 @@ if rpython.rlib.rvmprof.cintf.IS_SUPPORTED:
 
 translation_modules = default_modules.copy()
 translation_modules.update([
-    "fcntl", "time", "select", "signal", "_rawffi", "zlib", "struct", "_md5",
-    "cStringIO", "array", "binascii",
+    "fcntl", "time", "select", "signal", "_rawffi", "zlib", "struct",
+    "array", "binascii",
     # the following are needed for pyrepl (and hence for the
     # interactive prompt/pdb)
     "termios", "_minimal_curses",
@@ -62,9 +67,9 @@ reverse_debugger_disable_modules = set([
 # XXX this should move somewhere else, maybe to platform ("is this posixish"
 #     check or something)
 if sys.platform == "win32":
-    working_modules.add("_winreg")
     # unix only modules
-    for name in ["crypt", "fcntl", "pwd", "termios", "_minimal_curses"]:
+    for name in ["crypt", "fcntl", "pwd", "termios", "_minimal_curses",
+                 "_posixsubprocess"]:
         if name in working_modules:
             working_modules.remove(name)
         if name in translation_modules:
@@ -83,7 +88,7 @@ if sys.platform == "win32":
 
     # not ported yet
     if IS_64_BITS:
-        for name in ["cpyext", "_cppyy", "micronumpy"]:
+        for name in ["_cppyy", "micronumpy"]:
             if name in working_modules:
                 working_modules.remove(name)
 
@@ -94,6 +99,10 @@ if sys.platform == "sunos5":
     if "_cppyy" in working_modules:
         working_modules.remove("_cppyy")  # depends on ctypes
 
+if sys.platform.startswith('linux') and sys.maxsize <= 2**31:
+    # _hpy_universal needs tweaking to work on 32-bit linux
+    working_modules.remove('_hpy_universal')
+
 #if sys.platform.startswith("linux"):
 #    _mach = os.popen('uname -m', 'r').read().strip()
 #    if _mach.startswith(...):
@@ -103,6 +112,7 @@ if sys.platform == "sunos5":
 module_dependencies = {
     '_multiprocessing': [('objspace.usemodules.time', True),
                          ('objspace.usemodules.thread', True)],
+    '_cffi_backend': [('objspace.usemodules.thread', True)],
     'cpyext': [('objspace.usemodules.array', True)],
     '_cppyy': [('objspace.usemodules.cpyext', True)],
     'faulthandler': [('objspace.usemodules._vmprof', True)],
@@ -150,9 +160,6 @@ pypy_optiondescription = OptionDescription("objspace", "Object Space Options", [
                cmdline="--translationmodules",
                suggests=[("objspace.allworkingmodules", False)]),
 
-    BoolOption("lonepycfiles", "Import pyc files with no matching py file",
-               default=False),
-
     StrOption("soabi",
               "Tag to differentiate extension modules built for different Python interpreters",
               cmdline="--soabi",
@@ -172,12 +179,25 @@ pypy_optiondescription = OptionDescription("objspace", "Object Space Options", [
                default=False,
                requires=[("objspace.usemodules.cpyext", False)]),
 
+    BoolOption("disable_entrypoints_in_cffi",
+               "Disable only cffi's embedding mode.",
+               default=False),
+
     ChoiceOption("hash",
                  "The hash function to use for strings: fnv from CPython 2.7"
                  " or siphash24 from CPython >= 3.4",
                  ["fnv", "siphash24"],
-                 default="fnv",
+                 default="siphash24",
                  cmdline="--hash"),
+
+    BoolOption("hpy_cpyext_API",
+               "Enable the HPy/cpyext API in the hpy_universal module",
+               default=True),
+
+    StrOption("platlibdir",
+              "Configure the platlibdir at translation time",
+              cmdline="--platlibdir",
+              default="lib"),
 
     OptionDescription("std", "Standard Object Space Options", [
         BoolOption("withtproxy", "support transparent proxies",
@@ -220,11 +240,6 @@ pypy_optiondescription = OptionDescription("objspace", "Object Space Options", [
         BoolOption("newshortcut",
                    "cache and shortcut calling __new__ from builtin types",
                    default=False),
-        BoolOption("reinterpretasserts",
-                   "Perform reinterpretation when an assert fails "
-                   "(only relevant for tests)",
-                   default=False),
-
      ]),
 ])
 
@@ -263,6 +278,9 @@ def set_pypy_opt_level(config, level):
     # extra optimizations with the JIT
     if level == 'jit':
         pass # none at the moment
+
+    if config.translation.sandbox or config.translation.reverse_debugger:
+        config.objspace.hash = "fnv"
 
 
 def enable_allworkingmodules(config):

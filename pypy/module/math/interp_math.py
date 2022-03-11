@@ -4,11 +4,15 @@ import sys
 from rpython.rlib import rfloat
 from rpython.rlib.objectmodel import specialize
 from pypy.interpreter.error import OperationError, oefmt
+from pypy.interpreter.gateway import unwrap_spec, WrappedDefault
 
 class State:
     def __init__(self, space):
         self.w_e = space.newfloat(math.e)
         self.w_pi = space.newfloat(math.pi)
+        self.w_tau = space.newfloat(math.pi * 2.0)
+        self.w_inf = space.newfloat(rfloat.INFINITY)
+        self.w_nan = space.newfloat(rfloat.NAN)
 def get(space):
     return space.fromcache(State)
 
@@ -54,6 +58,9 @@ def math2(space, f, w_x, w_snd):
 
 def trunc(space, w_x):
     """Truncate x."""
+    w_descr = space.lookup(w_x, '__trunc__')
+    if w_descr is not None:
+        return space.get_and_call_function(w_descr, w_x)
     return space.trunc(w_x)
 
 def copysign(space, w_x, w_y):
@@ -70,6 +77,12 @@ def isinf(space, w_x):
 def isnan(space, w_x):
     """Return True if x is not a number."""
     return space.newbool(math.isnan(_get_double(space, w_x)))
+
+def isfinite(space, w_x):
+    """isfinite(x) -> bool
+
+    Return True if x is neither an infinity nor a NaN, and False otherwise."""
+    return space.newbool(rfloat.isfinite(_get_double(space, w_x)))
 
 def pow(space, w_x, w_y):
     """pow(x,y)
@@ -89,8 +102,7 @@ def ldexp(space, w_x,  w_i):
     """ldexp(x, i) -> x * (2**i)
     """
     x = _get_double(space, w_x)
-    if (space.isinstance_w(w_i, space.w_int) or
-        space.isinstance_w(w_i, space.w_long)):
+    if space.isinstance_w(w_i, space.w_int):
         try:
             exp = space.int_w(w_i)
         except OperationError as e:
@@ -110,12 +122,112 @@ def ldexp(space, w_x,  w_i):
         raise oefmt(space.w_ValueError, "math domain error")
     return space.newfloat(r)
 
-def hypot(space, w_x, w_y):
-    """hypot(x,y)
-
-       Return the Euclidean distance, sqrt(x*x + y*y).
+def hypot(space, args_w):
     """
-    return math2(space, math.hypot, w_x, w_y)
+    Multidimensional Euclidean distance from the origin to a point.
+
+    Roughly equivalent to:
+        sqrt(sum(x**2 for x in args))
+
+    For a two dimensional point (x, y), gives the hypotenuse
+    using the Pythagorean theorem:  sqrt(x*x + y*y).
+
+    For example, the hypotenuse of a 3/4/5 right triangle is:
+
+        >>> hypot(3.0, 4.0)
+        5.0
+    """
+    vec = [0.0] * len(args_w)
+    found_nan = False
+    max = 0.0
+    for i in range(len(args_w)):
+        w_x = args_w[i]
+        x = math.fabs(_get_double(space, w_x))
+        found_nan = math.isnan(x) or found_nan
+        if x > max:
+            max = x
+        vec[i] = x
+    result = _vector_norm(vec, max, found_nan)
+    return space.newfloat(result)
+
+def dist(space, w_p, w_q, __posonly__=None):
+    """
+    Return the Euclidean distance between two points p and q.
+
+    The points should be specified as sequences (or iterables) of
+    coordinates.  Both inputs must have the same dimension.
+
+    Roughly equivalent to:
+        sqrt(sum((px - qx) ** 2.0 for px, qx in zip(p, q)))
+    """
+    p_w = space.unpackiterable(w_p)
+    q_w = space.unpackiterable(w_q)
+    if len(p_w) != len(q_w):
+        raise oefmt(space.w_ValueError, "both points must have the same number of dimensions")
+
+    vec = [0.0] * len(p_w)
+    found_nan = False
+    max = 0.0
+    for i in range(len(p_w)):
+        px = _get_double(space, p_w[i])
+        qx = _get_double(space, q_w[i])
+        x = math.fabs(px - qx)
+        found_nan = math.isnan(x) or found_nan
+        if x > max:
+            max = x
+        vec[i] = x
+    result = _vector_norm(vec, max, found_nan)
+    return space.newfloat(result)
+
+
+def _vector_norm(vec, max, found_nan):
+    # code and comment from CPython's vector_norm
+
+    # Given an *n* length *vec* of values and a value *max*, compute:
+    #
+    #     max * sqrt(sum((x / max) ** 2 for x in vec))
+    #
+    # The value of the *max* variable must be non-negative and equal to the
+    # absolute value of the largest magnitude entry in the vector.  If n==0,
+    # then *max* should be 0.0. If an infinity is present in the vec, *max*
+    # should be INF.
+    #
+    # The *found_nan* variable indicates whether some member of the *vec* is a
+    # NaN.
+    #
+    # To improve accuracy and to increase the number of cases where
+    # vector_norm() is commutative, we use a variant of Neumaier summation
+    # specialized to exploit that we always know that |csum| >= |x|.
+    #
+    # The *csum* variable tracks the cumulative sum and *frac* tracks the
+    # cumulative fractional errors at each step.  Since this variant assumes
+    # that |csum| >= |x| at each step, we establish the precondition by
+    # starting the accumulation from 1.0 which represents the largest possible
+    # value of (x/max)**2.
+    #
+    # After the loop is finished, the initial 1.0 is subtracted out for a net
+    # zero effect on the final sum.  Since *csum* will be greater than 1.0, the
+    # subtraction of 1.0 will not cause fractional digits to be dropped from
+    # *csum*.
+
+    x = csum = 1.0
+    oldsum = frac = 0.0
+    if math.isinf(max):
+        return max
+    if found_nan:
+        return rfloat.NAN
+    if max == 0.0 or len(vec) <= 1:
+        return max
+    for x in vec:
+        assert rfloat.isfinite(x) and math.fabs(x) <= max
+        x /= max
+        x = x * x
+        oldcsum = csum
+        csum += x
+        assert csum >= x
+        frac += (oldcsum - csum) + x
+    return max * math.sqrt(csum - 1.0 + frac)
+
 
 def tan(space, w_x):
     """tan(x)
@@ -141,11 +253,15 @@ def fabs(space, w_x):
 def floor(space, w_x):
     """floor(x)
 
-       Return the floor of x as a float.
+       Return the floor of x as an int.
        This is the largest integral value <= x.
     """
+    from pypy.objspace.std.floatobject import newint_from_float
+    w_descr = space.lookup(w_x, '__floor__')
+    if w_descr is not None:
+        return space.get_and_call_function(w_descr, w_x)
     x = _get_double(space, w_x)
-    return space.newfloat(math.floor(x))
+    return newint_from_float(space, math.floor(x))
 
 def sqrt(space, w_x):
     """sqrt(x)
@@ -174,14 +290,21 @@ def degrees(space, w_x):
 def _log_any(space, w_x, base):
     # base is supposed to be positive or 0.0, which means we use e
     try:
-        if space.isinstance_w(w_x, space.w_long):
+        try:
+            x = _get_double(space, w_x)
+        except OperationError as e:
+            if not e.match(space, space.w_OverflowError):
+                raise
+            if not space.isinstance_w(w_x, space.w_int):
+                raise
             # special case to support log(extremely-large-long)
             num = space.bigint_w(w_x)
             result = num.log(base)
         else:
-            x = _get_double(space, w_x)
             if base == 10.0:
                 result = math.log10(x)
+            elif base == 2.0:
+                result = rfloat.log2(x)
             else:
                 result = math.log(x)
                 if base != 0.0:
@@ -206,6 +329,11 @@ def log(space, w_x, w_base=None):
             return math1(space, math.log, w_base)
     return _log_any(space, w_x, base)
 
+def log2(space, w_x):
+    """log2(x) -> the base 2 logarithm of x.
+    """
+    return _log_any(space, w_x, 2.0)
+
 def log10(space, w_x):
     """log10(x) -> the base 10 logarithm of x.
     """
@@ -228,10 +356,14 @@ def atan(space, w_x):
 def ceil(space, w_x):
     """ceil(x)
 
-       Return the ceiling of x as a float.
+       Return the ceiling of x as an int.
        This is the smallest integral value >= x.
     """
-    return math1(space, math.ceil, w_x)
+    from pypy.objspace.std.floatobject import newint_from_float
+    w_descr = space.lookup(w_x, '__ceil__')
+    if w_descr is not None:
+        return space.get_and_call_function(w_descr, w_x)
+    return newint_from_float(space, math1_w(space, math.ceil, w_x))
 
 def sinh(space, w_x):
     """sinh(x)
@@ -362,7 +494,13 @@ def fsum(space, w_iterable):
 
 def log1p(space, w_x):
     """Find log(x + 1)."""
-    return math1(space, rfloat.log1p, w_x)
+    try:
+        return math1(space, rfloat.log1p, w_x)
+    except OperationError as e:
+        # Python 2.x (and thus ll_math) raises a OverflowError improperly.
+        if not e.match(space, space.w_OverflowError):
+            raise
+        raise oefmt(space.w_ValueError, "math domain error")
 
 def acosh(space, w_x):
     """Inverse hyperbolic cosine"""
@@ -395,4 +533,117 @@ def gamma(space, w_x):
 def lgamma(space, w_x):
     """Compute the natural logarithm of the gamma function for x."""
     return math1(space, rfloat.lgamma, w_x)
+
+@unwrap_spec(w_rel_tol=WrappedDefault(1e-09), w_abs_tol=WrappedDefault(0.0))
+def isclose(space, w_a, w_b, __kwonly__, w_rel_tol, w_abs_tol):
+    """isclose(a, b, *, rel_tol=1e-09, abs_tol=0.0) -> bool
+
+Determine whether two floating point numbers are close in value.
+
+   rel_tol
+       maximum difference for being considered "close", relative to the
+       magnitude of the input values
+   abs_tol
+       maximum difference for being considered "close", regardless of the
+       magnitude of the input values
+
+Return True if a is close in value to b, and False otherwise.
+
+For the values to be considered close, the difference between them
+must be smaller than at least one of the tolerances.
+
+-inf, inf and NaN behave similarly to the IEEE 754 Standard.  That
+is, NaN is not close to anything, even itself.  inf and -inf are
+only close to themselves."""
+    a = _get_double(space, w_a)
+    b = _get_double(space, w_b)
+    rel_tol = _get_double(space, w_rel_tol)
+    abs_tol = _get_double(space, w_abs_tol)
+    #
+    # sanity check on the inputs
+    if rel_tol < 0.0 or abs_tol < 0.0:
+        raise oefmt(space.w_ValueError, "tolerances must be non-negative")
+    #
+    # short circuit exact equality -- needed to catch two infinities of
+    # the same sign. And perhaps speeds things up a bit sometimes.
+    if a == b:
+        return space.w_True
+    #
+    # This catches the case of two infinities of opposite sign, or
+    # one infinity and one finite number. Two infinities of opposite
+    # sign would otherwise have an infinite relative tolerance.
+    # Two infinities of the same sign are caught by the equality check
+    # above.
+    if math.isinf(a) or math.isinf(b):
+        return space.w_False
+    #
+    # now do the regular computation
+    # this is essentially the "weak" test from the Boost library
+    diff = math.fabs(b - a)
+    result = ((diff <= math.fabs(rel_tol * b) or
+               diff <= math.fabs(rel_tol * a)) or
+              diff <= abs_tol)
+    return space.newbool(result)
+
+def gcd(space, args_w):
+    """greatest common divisor"""
+    if len(args_w) == 0:
+        return space.newint(0)
+    if len(args_w) == 1:
+        space.index(args_w[0]) # for the error
+        return space.abs(args_w[0])
+    if len(args_w) == 2:
+        return gcd_two(space, args_w[0], args_w[1])
+    return _gcd_many(space, args_w)
+
+def _gcd_many(space, args_w):
+    w_res = args_w[0]
+    # could jit this, but do we care?
+    for i in range(1, len(args_w)):
+        w_res = gcd_two(space, w_res, args_w[i])
+    return w_res
+
+
+def gcd_two(space, w_a, w_b):
+    from rpython.rlib import rbigint
+    w_a = space.abs(space.index(w_a))
+    w_b = space.abs(space.index(w_b))
+    try:
+        a = space.int_w(w_a)
+        b = space.int_w(w_b)
+    except OperationError as e:
+        if not e.match(space, space.w_OverflowError):
+            raise
+
+        a = space.bigint_w(w_a)
+        b = space.bigint_w(w_b)
+        g = a.gcd(b)
+        return space.newlong_from_rbigint(g)
+    else:
+        g = rbigint.gcd_binary(a, b)
+        return space.newint(g)
+
+def nextafter(space, w_a, w_b):
+    """ Return the next floating-point value after x towards y. """
+    a = _get_double(space, w_a)
+    b = _get_double(space, w_b)
+    return space.newfloat(rfloat.nextafter(a, b))
+
+def ulp(space, w_x):
+    """Return the value of the least significant bit of the
+    float x.
+    """
+    x = _get_double(space, w_x)
+    if math.isnan(x):
+        return w_x
+    x = math.fabs(float(x))
+    if math.isinf(x):
+        return space.newfloat(x)
+
+    x2 = rfloat.nextafter(x, rfloat.INFINITY)
+    if math.isinf(x2):
+        # special case: x is the largest positive representable float
+        x2 = rfloat.nextafter(x, -rfloat.INFINITY)
+        return space.newfloat(x - x2)
+    return space.newfloat(x2 - x)
 

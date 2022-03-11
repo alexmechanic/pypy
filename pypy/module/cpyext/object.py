@@ -1,14 +1,16 @@
 from rpython.rtyper.lltypesystem import rffi, lltype
+from rpython.rlib.rarithmetic import widen
 from pypy.module.cpyext.api import (
-    cpython_api, generic_cpy_call, CANNOT_FAIL, Py_ssize_t, Py_ssize_tP,
-    PyVarObject, size_t, slot_function, INTP_real,
+    cpython_api, generic_cpy_call, CANNOT_FAIL, Py_ssize_t,
+    PyVarObject, size_t, slot_function, cts,
     Py_TPFLAGS_HEAPTYPE, Py_LT, Py_LE, Py_EQ, Py_NE, Py_GT,
-    Py_GE, CONST_STRING, FILEP, fwrite, c_only)
+    Py_GE, CONST_STRING, FILEP, fwrite, c_only, PY_SSIZE_T_MAX)
 from pypy.module.cpyext.pyobject import (
     PyObject, PyObjectP, from_ref, incref, decref,
     get_typedescr, hack_for_result_often_existing_obj)
 from pypy.module.cpyext.pyerrors import PyErr_NoMemory, PyErr_BadInternalCall
 from pypy.objspace.std.typeobject import W_TypeObject
+from pypy.objspace.std.bytesobject import invoke_bytes_method
 from pypy.interpreter.error import OperationError, oefmt
 from pypy.interpreter.executioncontext import ExecutionContext
 import pypy.module.__builtin__.operation as operation
@@ -19,6 +21,14 @@ def PyObject_Malloc(space, size):
     # returns non-zero-initialized memory, like CPython
     return lltype.malloc(rffi.VOIDP.TO, size,
                          flavor='raw',
+                         add_memory_pressure=True)
+
+@cpython_api([size_t, size_t], rffi.VOIDP)
+def PyObject_Calloc(space, nelem, elsize):
+    if elsize != 0 and nelem > PY_SSIZE_T_MAX / elsize:
+        return lltype.nullptr(rffi.VOIDP.TO)
+    return lltype.malloc(rffi.VOIDP.TO, nelem * elsize,
+                         flavor='raw', zero=True,
                          add_memory_pressure=True)
 
 realloc = rffi.llexternal('realloc', [rffi.VOIDP, rffi.SIZE_T], rffi.VOIDP)
@@ -54,7 +64,7 @@ def _dealloc(space, obj):
     pto = obj.c_ob_type
     obj_voidp = rffi.cast(rffi.VOIDP, obj)
     generic_cpy_call(space, pto.c_tp_free, obj_voidp)
-    if pto.c_tp_flags & Py_TPFLAGS_HEAPTYPE:
+    if widen(pto.c_tp_flags) & Py_TPFLAGS_HEAPTYPE:
         decref(space, rffi.cast(PyObject, pto))
 
 @cpython_api([PyObject], PyObjectP, error=CANNOT_FAIL)
@@ -181,6 +191,19 @@ def PyObject_Str(space, w_obj):
         return space.newtext("<NULL>")
     return space.str(w_obj)
 
+@cts.decl("PyObject * PyObject_Bytes(PyObject *v)")
+def PyObject_Bytes(space, w_obj):
+    if w_obj is None:
+        return space.newbytes("<NULL>")
+    if space.type(w_obj) is space.w_bytes:
+        return w_obj
+    w_result = invoke_bytes_method(space, w_obj)
+    if w_result is not None:
+        return w_result
+    # return PyBytes_FromObject(space, w_obj)
+    buffer = space.buffer_w(w_obj, space.BUF_FULL_RO)
+    return space.newbytes(buffer.as_str())
+
 @cpython_api([PyObject], PyObject)
 def PyObject_Repr(space, w_obj):
     """Compute a string representation of object o.  Returns the string
@@ -205,6 +228,15 @@ def PyObject_Format(space, w_obj, w_format_spec):
     return w_ret
 
 @cpython_api([PyObject], PyObject)
+def PyObject_ASCII(space, w_obj):
+    r"""As PyObject_Repr(), compute a string representation of object
+    o, but escape the non-ASCII characters in the string returned by
+    PyObject_Repr() with \x, \u or \U escapes.  This generates a
+    string similar to that returned by PyObject_Repr() in Python 2.
+    Called by the ascii() built-in function."""
+    return operation.ascii(space, w_obj)
+
+@cpython_api([PyObject], PyObject)
 def PyObject_Unicode(space, w_obj):
     """Compute a Unicode string representation of object o.  Returns the Unicode
     string representation on success, NULL on failure. This is the equivalent of
@@ -213,26 +245,6 @@ def PyObject_Unicode(space, w_obj):
     if w_obj is None:
         return space.newutf8("<NULL>", 6)
     return space.call_function(space.w_unicode, w_obj)
-
-@cpython_api([PyObject, PyObject], rffi.INT_real, error=-1)
-def PyObject_Compare(space, w_o1, w_o2):
-    """
-    Compare the values of o1 and o2 using a routine provided by o1, if one
-    exists, otherwise with a routine provided by o2.  Returns the result of the
-    comparison on success.  On error, the value returned is undefined; use
-    PyErr_Occurred() to detect an error.  This is equivalent to the Python
-    expression cmp(o1, o2)."""
-    return space.int_w(space.cmp(w_o1, w_o2))
-
-@cpython_api([PyObject, PyObject, INTP_real], rffi.INT_real, error=-1)
-def PyObject_Cmp(space, w_o1, w_o2, result):
-    """Compare the values of o1 and o2 using a routine provided by o1, if one
-    exists, otherwise with a routine provided by o2.  The result of the
-    comparison is returned in result.  Returns -1 on failure.  This is the
-    equivalent of the Python statement result = cmp(o1, o2)."""
-    res = space.int_w(space.cmp(w_o1, w_o2))
-    result[0] = rffi.cast(rffi.INT_real, res)
-    return 0
 
 @cpython_api([PyObject, PyObject, rffi.INT_real], PyObject)
 def PyObject_RichCompare(space, w_o1, w_o2, opid_int):
@@ -411,6 +423,12 @@ def PyObject_Print(space, pyobj, fp, flags):
         fwrite(buf, 1, count, fp)
     return 0
 
+@cts.decl("""
+    Py_ssize_t PyObject_LengthHint(PyObject *o, Py_ssize_t defaultvalue)""",
+    error=-1)
+def PyObject_LengthHint(space, w_o, defaultvalue):
+    return space.length_hint(w_o, defaultvalue)
+
 @cpython_api([lltype.Signed], lltype.Void)
 def _PyPyGC_AddMemoryPressure(space, report):
     from rpython.rlib import rgc
@@ -439,3 +457,16 @@ def Py_ReprLeave(space, w_obj):
             del d[w_obj]
         except KeyError:
             pass
+
+@cpython_api([PyObject, rffi.VOIDP], PyObject)
+def PyObject_GenericGetDict(space, w_obj, context):
+    from pypy.interpreter.typedef import descr_get_dict
+    return descr_get_dict(space, w_obj)
+
+@cpython_api([PyObject, PyObject, rffi.VOIDP], rffi.INT_real, error=-1)
+def PyObject_GenericSetDict(space, w_obj, w_value, context):
+    from pypy.interpreter.typedef import descr_set_dict
+    if w_value is None:
+        raise oefmt(space.w_TypeError, "cannot delete __dict__")
+    descr_set_dict(space, w_obj, w_value)
+    return 0

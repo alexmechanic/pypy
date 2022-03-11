@@ -18,7 +18,7 @@ class State:
     def __init__(self, space):
         self.space = space
         self.reset()
-        self.programname = lltype.nullptr(rffi.CCHARP.TO)
+        self.programname = lltype.nullptr(rffi.CWCHARP.TO)
         self.version = lltype.nullptr(rffi.CCHARP.TO)
         self.builder = None
         self.C = CNamespace()
@@ -150,10 +150,12 @@ class State:
             argv = space.sys.get('argv')
             if space.len_w(argv):
                 argv0 = space.getitem(argv, space.newint(0))
-                progname = space.text_w(argv0)
+                progname = space.utf8_w(argv0)
+                lgt = space.len_w(argv0)
             else:
-                progname = "pypy"
-            self.programname = rffi.str2charp(progname)
+                progname = "pypy3"
+                lgt = len(progname)
+            self.programname = rffi.utf82wcharp(progname, lgt)
             lltype.render_immortal(self.programname)
         return self.programname
 
@@ -165,29 +167,27 @@ class State:
             self.version = rffi.str2charp(version)
             lltype.render_immortal(self.version)
         return self.version
+        foo = self.import_module(name='foo', init=init)
 
     def find_extension(self, name, path):
-        from pypy.module.cpyext.modsupport import PyImport_AddModule
+        from pypy.module.cpyext.import_ import PyImport_AddModule
         from pypy.interpreter.module import Module
         try:
             w_dict = self.extensions[path]
         except KeyError:
             return None
-        w_mod = PyImport_AddModule(self.space, name)
+        with rffi.scoped_str2charp(name) as ll_name:
+            w_mod = PyImport_AddModule(self.space, ll_name)
         assert isinstance(w_mod, Module)
         w_mdict = w_mod.getdict(self.space)
         self.space.call_method(w_mdict, 'update', w_dict)
         return w_mod
 
-    def fixup_extension(self, name, path):
+    def fixup_extension(self, w_mod, name, path):
         from pypy.interpreter.module import Module
         space = self.space
         w_modules = space.sys.get('modules')
-        w_mod = space.finditem_str(w_modules, name)
-        if not isinstance(w_mod, Module):
-            msg = "fixup_extension: module '%s' not loaded" % name
-            raise OperationError(space.w_SystemError,
-                                 space.newtext(msg))
+        space.setitem_str(w_modules, name, w_mod)
         w_dict = w_mod.getdict(space)
         w_copy = space.call_method(w_dict, 'copy')
         self.extensions[path] = w_copy

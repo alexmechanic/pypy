@@ -137,7 +137,8 @@ class AppTestRecompilerPython:
     def test_dlopen_unicode(self):
         if not getattr(self, 'extmodU', None):
             skip("no unicode file name")
-        import _cffi_backend
+        import _cffi_backend, sys
+        sys.pypy_initfsencoding()   # initialize space.sys.filesystemencoding
         self.fix_path()
         from re_python_pysrc import ffi
         lib = ffi.dlopen(self.extmodU)
@@ -219,7 +220,7 @@ class AppTestRecompilerPython:
         self.fix_path()
         from re_python_pysrc import ffi
         lib = ffi.dlopen(self.extmod)
-        assert ffi.string(lib.globalconsthello, 8) == "hello"
+        assert ffi.string(lib.globalconsthello, 8) == b"hello"
         raises(AttributeError, ffi.addressof, lib, 'globalconsthello')
 
     def test_rtld_constants(self):

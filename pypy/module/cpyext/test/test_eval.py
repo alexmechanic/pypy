@@ -125,15 +125,16 @@ class TestEval(BaseApiTest):
     def test_run_string_flags(self, space):
         flags = lltype.malloc(PyCompilerFlags, flavor='raw')
         flags.c_cf_flags = rffi.cast(rffi.INT, consts.PyCF_SOURCE_IS_UTF8)
+        flags.c_cf_feature_version = rffi.cast(rffi.INT, -1)
         w_globals = space.newdict()
-        buf = rffi.str2charp("a = u'caf\xc3\xa9'")
+        buf = rffi.str2charp("a = 'caf\xc3\xa9'")
         try:
             PyRun_StringFlags(space, buf, Py_single_input, w_globals,
                               w_globals, flags)
         finally:
             rffi.free_charp(buf)
         w_a = space.getitem(w_globals, space.wrap("a"))
-        assert space.utf8_w(w_a) == u'caf\xe9'.encode('utf8')
+        assert space.utf8_w(w_a) == u'caf\xe9'.encode("utf-8")
         lltype.free(flags, flavor='raw')
 
     def test_run_file(self, space):
@@ -256,7 +257,7 @@ class AppTestCall(AppTestCpythonExtensionBase):
         module = self.import_extension('foo', [
             ("call_func", "METH_VARARGS",
              """
-                PyObject *t = PyString_FromString("t");
+                PyObject *t = PyUnicode_FromString("t");
                 PyObject *res = PyObject_CallFunctionObjArgs(
                    PyTuple_GetItem(args, 0),
                    Py_None, NULL);
@@ -265,8 +266,8 @@ class AppTestCall(AppTestCpythonExtensionBase):
              """),
             ("call_method", "METH_VARARGS",
              """
-                PyObject *t = PyString_FromString("t");
-                PyObject *count = PyString_FromString("count");
+                PyObject *t = PyUnicode_FromString("t");
+                PyObject *count = PyUnicode_FromString("count");
                 PyObject *res = PyObject_CallMethodObjArgs(
                    PyTuple_GetItem(args, 0),
                    count, t, NULL);
@@ -306,21 +307,22 @@ class AppTestCall(AppTestCpythonExtensionBase):
         mod = module.exec_code(code)
         assert mod.__name__ == "cpyext_test_modname"
         assert mod.__file__ == "someFile"
-        print dir(mod)
-        print mod.__dict__
+        print(dir(mod))
+        print(mod.__dict__)
         assert mod.f(42) == 47
 
         mod = module.exec_code_ex(code)
         assert mod.__name__ == "cpyext_test_modname"
         assert mod.__file__ == "otherFile"
-        print dir(mod)
-        print mod.__dict__
+        print(dir(mod))
+        print(mod.__dict__)
         assert mod.f(42) == 47
 
         # Clean-up
         del sys.modules['cpyext_test_modname']
 
     def test_merge_compiler_flags(self):
+        import sys
         module = self.import_extension('foo', [
             ("get_flags", "METH_NOARGS",
              """
@@ -334,11 +336,19 @@ class AppTestCall(AppTestCpythonExtensionBase):
         assert module.get_flags() == (0, 0)
 
         ns = {'module': module}
-        exec """from __future__ import division    \nif 1:
-                def nested_flags():
-                    return module.get_flags()""" in ns
-        assert ns['nested_flags']() == (1, 0x2000)  # CO_FUTURE_DIVISION
+        if not hasattr(sys, 'pypy_version_info'):  # no barry_as_FLUFL on pypy
+            exec("""from __future__ import barry_as_FLUFL    \nif 1:
+                    def nested_flags():
+                        return module.get_flags()""", ns)
+            assert ns['nested_flags']() == (1, 0x40000)
 
+        # the division future should have no effect on Python 3
+        exec("""from __future__ import division    \nif 1:
+                def nested_flags():
+                    return module.get_flags()""", ns)
+        assert ns['nested_flags']() == (0, 0)
+
+    @pytest.mark.xfail("'linux' not in sys.platform", reason='Hangs the process', run=False)
     def test_recursive_function(self):
         module = self.import_extension('foo', [
             ("call_recursive", "METH_NOARGS",
@@ -364,14 +374,11 @@ class AppTestCall(AppTestCpythonExtensionBase):
                 };
              '''
             )
-        try:
-            res = module.call_recursive()
-        except RuntimeError as e:
-            assert 'while calling recurse' in str(e)
-        else:
-            assert False, "expected RuntimeError"
+        excinfo = raises(RecursionError, module.call_recursive)
+        assert 'while calling recurse' in str(excinfo.value)
 
     def test_build_class(self):
+            """
             # make sure PyObject_Call generates a proper PyTypeObject,
             # along the way verify that userslot has iter and next
             module = self.import_extension('foo', [
@@ -396,7 +403,35 @@ class AppTestCall(AppTestCpythonExtensionBase):
                         return NULL;
                     }
                     return args->ob_type->tp_iternext(args);
-                 '''),])
+                 '''),
+                ('await_', "METH_O",
+                 '''
+                    if (NULL == args->ob_type->tp_as_async->am_await)
+                    {
+                        PyErr_SetString(PyExc_TypeError, "NULL am_await");
+                        return NULL;
+                    }
+                    return args->ob_type->tp_as_async->am_await(args);
+                 '''),
+                ('aiter', "METH_O",
+                 '''
+                    if (NULL == args->ob_type->tp_as_async->am_aiter)
+                    {
+                        PyErr_SetString(PyExc_TypeError, "NULL am_aiter");
+                        return NULL;
+                    }
+                    return args->ob_type->tp_as_async->am_aiter(args);
+                 '''),
+                ('anext', "METH_O",
+                 '''
+                    if (NULL == args->ob_type->tp_as_async->am_anext)
+                    {
+                        PyErr_SetString(PyExc_TypeError, "NULL am_anext");
+                        return NULL;
+                    }
+                    return args->ob_type->tp_as_async->am_anext(args);
+                 '''),
+            ])
             def __init__(self, N):
                 self.N = N
                 self.i = 0
@@ -412,7 +447,7 @@ class AppTestCall(AppTestCpythonExtensionBase):
                 raise StopIteration
 
             d = {'__init__': __init__, '__iter__': __iter__, 'next': __next__,
-                 '__next__': next}
+                 '__next__': __next__}
             C = module.object_call(('Iterable', (object,), d))
             c = C(5)
             i = module.iter(c)
@@ -423,6 +458,62 @@ class AppTestCall(AppTestCpythonExtensionBase):
             except StopIteration:
                 pass
             assert out == [0, 1, 2, 3, 4]
+
+            def run_async(coro):
+                buffer = []
+                result = None
+                while True:
+                    try:
+                        buffer.append(coro.send(None))
+                    except StopIteration as ex:
+                        result = ex.value
+                        break
+                return buffer, result
+
+            def __await__(self):
+                yield 42
+                return 100
+
+            Awaitable = module.object_call((
+                'Awaitable', (object,), {'__await__': __await__}))
+
+            async def wrapper():
+                return await Awaitable()
+
+            assert run_async(module.await_(Awaitable())) == ([42], 100)
+            assert run_async(wrapper()) == ([42], 100)
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.i < self.N:
+                    res = self.i
+                    self.i += 1
+                    return res
+                raise StopAsyncIteration
+
+            AIter = module.object_call(('AIter', (object,),
+                {'__init__': __init__, '__aiter__': __aiter__,
+                 '__anext__': __anext__}))
+
+            async def list1():
+                s = []
+                async for i in AIter(3):
+                    s.append(i)
+                return s
+            async def list2():
+                s = []
+                ait = module.aiter(AIter(3))
+                try:
+                    while True:
+                        s.append(await module.anext(ait))
+                except StopAsyncIteration:
+                    return s
+
+            assert run_async(list1()) == ([], [0, 1, 2])
+            assert run_async(list2()) == ([], [0, 1, 2])
+            """
 
     def test_getframe(self):
         import sys

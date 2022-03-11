@@ -2,11 +2,11 @@ import os
 import pytest
 import sys
 
-disabled = None
+disabled = True  # disable on py3
 THIS_DIR = os.path.dirname(__file__)
 
 if sys.maxsize > 2**32 and sys.platform == 'win32':
-    # cpyext not yet supported on windows 64 bit
+    # micronumpy not yet supported on windows 64 bit
     disabled = True
 
 def pytest_ignore_collect(path, config):

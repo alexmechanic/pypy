@@ -5,8 +5,8 @@ Compiler instances are stored into 'space.getexecutioncontext().compiler'.
 
 from pypy.interpreter import pycode
 from pypy.interpreter.pyparser import future, pyparse, error as parseerror
-from pypy.interpreter.astcompiler import (astbuilder, codegen, consts, misc,
-                                          optimize, ast)
+from pypy.interpreter.astcompiler import (codegen, consts, misc,
+                                          optimize, ast, validate)
 from pypy.interpreter.error import OperationError, oefmt
 
 
@@ -20,7 +20,7 @@ class AbstractCompiler(object):
         self.space = space
         self.w_compile_hook = space.w_None
 
-    def compile(self, source, filename, mode, flags):
+    def compile(self, source, filename, mode, flags=0):
         """Compile and return an pypy.interpreter.eval.Code instance."""
         raise NotImplementedError
 
@@ -101,32 +101,40 @@ class PythonAstCompiler(PyCodeCompiler):
     """
     def __init__(self, space, override_version=None):
         PyCodeCompiler.__init__(self, space)
-        self.future_flags = future.futureFlags_2_7
-        self.parser = pyparse.PythonParser(space, self.future_flags)
+        self.future_flags = future.futureFlags_3_8
+        self.parser = pyparse.PegParser(space, self.future_flags)
         self.additional_rules = {}
         self.compiler_flags = self.future_flags.allowed_flags
 
-    def compile_ast(self, node, filename, mode, flags):
+    def compile_ast(self, node, filename, mode, flags=0, optimize=-1):
         if mode == 'eval':
             check = isinstance(node, ast.Expression)
         elif mode == 'exec':
             check = isinstance(node, ast.Module)
         elif mode == 'input':
             check = isinstance(node, ast.Interactive)
+        elif mode == 'func_type':
+            raise oefmt(self.space.w_ValueError, "can't compile func_type input")
         else:
             check = True
         if not check:
             raise oefmt(self.space.w_TypeError, "invalid node type")
+        if optimize == -1:
+            optimize = self.space.sys.get_optimize()
 
-        fut = misc.parse_future(node, self.future_flags.compiler_features)
+        fut = misc.parse_future(self.space, node, self.future_flags.compiler_features)
         f_flags, f_lineno, f_col = fut
         future_pos = f_lineno, f_col
         flags |= f_flags
-        info = pyparse.CompileInfo(filename, mode, flags, future_pos)
+        info = pyparse.CompileInfo(filename, mode, flags, future_pos,
+                optimize=optimize)
         return self._compile_ast(node, info)
 
     def _compile_ast(self, node, info, source=None):
+        from pypy.interpreter.astcompiler.unparse import unparse_annotations
         space = self.space
+        if info.flags & consts.CO_FUTURE_ANNOTATIONS:
+            node = unparse_annotations(space, node)
         try:
             mod = optimize.optimize_ast(space, node, info)
             code = codegen.compile_ast(space, mod, info)
@@ -134,23 +142,40 @@ class PythonAstCompiler(PyCodeCompiler):
             raise OperationError(space.w_SyntaxError, e.find_sourceline_and_wrap_info(space, source))
         return code
 
-    def compile_to_ast(self, source, filename, mode, flags):
-        info = pyparse.CompileInfo(filename, mode, flags)
+    def validate_ast(self, node):
+        try:
+            validate.validate_ast(self.space, node)
+        except validate.ValidationTypeError as e:
+            raise OperationError(self.space.w_TypeError,
+                                 self.space.newtext(e.message))
+        except validate.ValidationError as e:
+            raise OperationError(self.space.w_ValueError,
+                                 self.space.newtext(e.message))
+
+    def compile_to_ast(self, source, filename, mode, flags=0, feature_version=-1):
+        info = pyparse.CompileInfo(filename, mode, flags, feature_version=feature_version)
         return self._compile_to_ast(source, info)
 
     def _compile_to_ast(self, source, info):
         space = self.space
+        self.parser.reset()
         try:
-            parse_tree = self.parser.parse_source(source, info)
-            mod = astbuilder.ast_from_node(space, parse_tree, info)
+            mod = self.parser.parse_source(source, info)
+        except parseerror.TabError as e:
+            raise OperationError(space.w_TabError,
+                                 e.find_sourceline_and_wrap_info(space))
         except parseerror.IndentationError as e:
             raise OperationError(space.w_IndentationError, e.find_sourceline_and_wrap_info(space))
         except parseerror.SyntaxError as e:
             raise OperationError(space.w_SyntaxError, e.find_sourceline_and_wrap_info(space, source))
         return mod
 
-    def compile(self, source, filename, mode, flags, hidden_applevel=False):
+    def compile(self, source, filename, mode, flags=0, hidden_applevel=False,
+            optimize=-1):
+        if optimize == -1:
+            optimize = self.space.sys.get_optimize()
+        assert optimize >= 0
         info = pyparse.CompileInfo(filename, mode, flags,
-                                   hidden_applevel=hidden_applevel)
+                hidden_applevel=hidden_applevel, optimize=optimize)
         mod = self._compile_to_ast(source, info)
         return self._compile_ast(mod, info, source)

@@ -1,7 +1,9 @@
-from pypy.interpreter.error import OperationError, oefmt
+from pypy.interpreter.error import oefmt
 from pypy.interpreter.gateway import unwrap_spec
 from rpython.rlib.rstring import StringBuilder
 from rpython.rlib.rarithmetic import ovfcheck
+from pypy.module.binascii.interp_binascii import raise_Error
+from pypy.module.binascii.interp_binascii import AsciiBufferUnwrapper
 
 # ____________________________________________________________
 
@@ -13,18 +15,24 @@ def _value2char(value):
 _value2char._always_inline_ = True
 
 @unwrap_spec(data='bufferstr')
-def hexlify(space, data):
+def hexlify(space, data, w_sep=None, w_bytes_per_sep=None):
     '''Hexadecimal representation of binary data.
-This function is also available as "hexlify()".'''
-    try:
-        newlength = ovfcheck(len(data) * 2)
-    except OverflowError:
-        raise OperationError(space.w_MemoryError, space.w_None)
-    res = StringBuilder(newlength)
-    for c in data:
-        res.append(_value2char(ord(c) >> 4))
-        res.append(_value2char(ord(c) & 0xf))
-    return space.newbytes(res.build())
+
+  sep
+    An optional single character or byte to separate hex bytes.
+  bytes_per_sep
+    How many bytes between separators.  Positive values count from the
+    right, negative values count from the left.
+
+The return value is a bytes object.  This function is also
+available as "b2a_hex()".'''
+    from pypy.objspace.std.bytearrayobject import _array_to_hexstring, unwrap_hex_sep_arguments
+    from pypy.interpreter.buffer import StringBuffer
+    sep, bytes_per_sep = unwrap_hex_sep_arguments(space, w_sep, w_bytes_per_sep)
+    w_res = _array_to_hexstring(space, StringBuffer(data), 0, 1,
+                                len(data), sep=sep, bytes_per_sep=bytes_per_sep)
+    # it's a string, need to turn it into a bytes
+    return space.newbytes(space.text_w(w_res))
 
 # ____________________________________________________________
 
@@ -38,16 +46,16 @@ def _char2value(space, c):
     elif c <= 'f':
         if c >= 'a':
             return ord(c) - (ord('a')-10)
-    raise oefmt(space.w_TypeError, "Non-hexadecimal digit found")
+    raise_Error(space, 'Non-hexadecimal digit found')
 _char2value._always_inline_ = True
 
-@unwrap_spec(hexstr='bufferstr')
+@unwrap_spec(hexstr=AsciiBufferUnwrapper)
 def unhexlify(space, hexstr):
     '''Binary data of hexadecimal representation.
 hexstr must contain an even number of hex digits (upper or lower case).
 This function is also available as "unhexlify()".'''
     if len(hexstr) & 1:
-        raise oefmt(space.w_TypeError, "Odd-length string")
+        raise_Error(space, 'Odd-length string')
     res = StringBuilder(len(hexstr) >> 1)
     for i in range(0, len(hexstr), 2):
         a = _char2value(space, hexstr[i])

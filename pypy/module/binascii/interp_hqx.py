@@ -2,6 +2,7 @@ from pypy.interpreter.error import OperationError
 from pypy.interpreter.gateway import unwrap_spec
 from rpython.rlib.rstring import StringBuilder
 from pypy.module.binascii.interp_binascii import raise_Error, raise_Incomplete
+from pypy.module.binascii.interp_binascii import AsciiBufferUnwrapper
 from rpython.rlib.rarithmetic import ovfcheck
 
 # ____________________________________________________________
@@ -62,10 +63,14 @@ table_a2b_hqx = [
 ]
 table_a2b_hqx = ''.join(map(chr, table_a2b_hqx))
 
-@unwrap_spec(ascii='bufferstr')
+@unwrap_spec(ascii=AsciiBufferUnwrapper)
 def a2b_hqx(space, ascii):
     """Decode .hqx coding.  Returns (bin, done)."""
 
+    space.warn(
+        space.newtext("binascii.a2b_hqx() is deprecated"),
+        space.w_DeprecationWarning,
+    ) 
     # overestimate the resulting length
     res = StringBuilder(len(ascii))
     done = 0
@@ -107,6 +112,7 @@ hqx_encoding = (
 @unwrap_spec(bin='bufferstr')
 def b2a_hqx(space, bin):
     "Encode .hqx data."
+    space.warn(space.newtext("binascii.b2a_hqx() is deprecated"), space.w_DeprecationWarning)
     extra = (len(bin) + 2) // 3
     try:
         newlength = ovfcheck(len(bin) + extra)
@@ -135,6 +141,10 @@ def b2a_hqx(space, bin):
 @unwrap_spec(hexbin='bufferstr')
 def rledecode_hqx(space, hexbin):
     "Decode hexbin RLE-coded string."
+    space.warn(
+        space.newtext("binascii.rledecode_hqx() is deprecated"),
+        space.w_DeprecationWarning,
+    ) 
 
     # that's a guesstimation of the resulting length
     res = StringBuilder(len(hexbin))
@@ -168,6 +178,10 @@ def rledecode_hqx(space, hexbin):
 def rlecode_hqx(space, data):
     "Binhex RLE-code binary data."
 
+    space.warn(
+        space.newtext("binascii.rlecode_hqx() is deprecated"),
+        space.w_DeprecationWarning,
+    ) 
     # that's a guesstimation of the resulting length
     res = StringBuilder(len(data))
 
@@ -236,10 +250,14 @@ crctab_hqx = [
         0x6e17, 0x7e36, 0x4e55, 0x5e74, 0x2e93, 0x3eb2, 0x0ed1, 0x1ef0,
 ]
 
-@unwrap_spec(data='bufferstr', oldcrc=int)
-def crc_hqx(space, data, oldcrc):
+@unwrap_spec(data='bufferstr')
+def crc_hqx(space, data, w_oldcrc):
     "Compute CRC-CCIT incrementally."
-    crc = oldcrc
+
+    # CPython converts the oldcrc argument to unsigned long, without overflow
+    # checking. we do the mask with wrapped objects, to deal with huge
+    # arguments
+    crc = space.int_w(space.and_(w_oldcrc, space.newint(0xffff)))
     for c in data:
         crc = ((crc << 8) & 0xff00) ^ crctab_hqx[((crc >> 8) & 0xff) ^ ord(c)]
     return space.newint(crc)

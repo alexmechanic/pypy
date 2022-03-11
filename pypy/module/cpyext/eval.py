@@ -13,7 +13,8 @@ from pypy.module.cpyext.frameobject import PyFrameObject
 from pypy.module.__builtin__ import compiling
 
 PyCompilerFlags = cpython_struct(
-    "PyCompilerFlags", (("cf_flags", rffi.INT),))
+    "PyCompilerFlags", (("cf_flags", rffi.INT),
+                        ("cf_feature_version", rffi.INT)))
 PyCompilerFlagsPtr = lltype.Ptr(PyCompilerFlags)
 
 PyCF_MASK = (consts.CO_FUTURE_DIVISION |
@@ -85,6 +86,10 @@ def PyObject_CallObject(space, w_obj, w_arg):
     callable_object(*args)."""
     return space.call(w_obj, w_arg)
 
+@cpython_api([PyObject], PyObject)
+def _PyObject_CallNoArg(space, w_obj):
+    return space.call_function(w_obj)
+
 @cpython_api([PyObject, PyObject, PyObject], PyObject)
 def PyObject_Call(space, w_obj, w_args, w_kw):
     """
@@ -105,8 +110,9 @@ def PyCFunction_Call(space, w_obj, w_args, w_kw):
 Py_single_input = 256
 Py_file_input = 257
 Py_eval_input = 258
+Py_func_type_input = 345
 
-def compile_string(space, source, filename, start, flags=0):
+def compile_string(space, source, filename, start, flags=0, feature_version=-1):
     w_source = space.newbytes(source)
     start = rffi.cast(lltype.Signed, start)
     if start == Py_file_input:
@@ -115,10 +121,13 @@ def compile_string(space, source, filename, start, flags=0):
         mode = 'eval'
     elif start == Py_single_input:
         mode = 'single'
+    elif start == Py_func_type_input:
+        mode = 'func_type'
     else:
         raise oefmt(space.w_ValueError,
                     "invalid mode parameter for compilation")
-    return compiling.compile(space, w_source, filename, mode, flags)
+    return compiling.compile(space, w_source, filename, mode, flags,
+                             _feature_version=feature_version)
 
 def run_string(space, source, filename, start, w_globals, w_locals):
     w_code = compile_string(space, source, filename, start)
@@ -154,9 +163,12 @@ def PyRun_StringFlags(space, source, start, w_globals, w_locals, flagsptr):
     source = rffi.charp2str(source)
     if flagsptr:
         flags = rffi.cast(lltype.Signed, flagsptr.c_cf_flags)
+        feature_version = rffi.cast(lltype.Signed, flagsptr.c_cf_feature_version)
     else:
         flags = 0
-    w_code = compile_string(space, source, "<string>", start, flags)
+        feature_version = -1
+    w_code = compile_string(space, source, "<string>", start, flags=flags,
+                            feature_version=feature_version)
     return compiling.eval(space, w_code, w_globals, w_locals)
 
 @cpython_api([FILEP, CONST_STRING, rffi.INT_real, PyObject, PyObject], PyObject)
@@ -252,7 +264,7 @@ def Py_SetRecursionLimit(space, limit):
 
 limit = 0 # for testing
 
-@cpython_api([rffi.CCHARP], rffi.INT_real, error=1)
+@cpython_api([CONST_STRING], rffi.INT_real, error=1)
 def Py_EnterRecursiveCall(space, where):
     """Marks a point where a recursive C-level call is about to be performed.
 
@@ -272,12 +284,12 @@ def Py_EnterRecursiveCall(space, where):
         global limit
         limit += 1
         if limit > 10:
-            raise oefmt(space.w_RuntimeError, 
+            raise oefmt(space.w_RecursionError,
                  "maximum recursion depth exceeded%s", rffi.charp2str(where))
         return 0
     from rpython.rlib.rstack import stack_almost_full
     if stack_almost_full():
-        raise oefmt(space.w_RuntimeError,
+        raise oefmt(space.w_RecursionError,
                  "maximum recursion depth exceeded%s", rffi.charp2str(where))
     return 0
 

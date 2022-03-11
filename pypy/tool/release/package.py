@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-from __future__ import print_function
+from __future__ import print_function 
 """ packages PyPy, provided that it's already built.
-It uses 'pypy/goal/pypy-c' and parts of the rest of the working
+It uses 'pypy/goal/pypy%d.%d-c' and parts of the rest of the working
 copy.  Usage:
 
     package.py [--options] --archive-name=pypy-VER-PLATFORM
@@ -37,9 +37,9 @@ ARCH = get_arch()
 
 USE_ZIPFILE_MODULE = ARCH == 'win32'
 
-STDLIB_VER = "2.7"
+STDLIB_VER = "3"
+POSIX_EXE = 'pypy3.9'
 
-POSIX_EXE = 'pypy'
 
 from lib_pypy.pypy_tools.build_cffi_imports import (create_cffi_import_libraries,
         MissingDependenciesError, cffi_build_scripts)
@@ -55,6 +55,65 @@ def ignore_patterns(*patterns):
             ignored_names.extend(fnmatch.filter(names, pattern))
         return set(ignored_names)
     return _ignore_patterns
+
+def copytree(src, dst, ignore=None):
+    """Recursively copy a directory tree using shtuil.copy2().
+
+    If exception(s) occur, an Error is raised with a list of reasons.
+
+    The optional ignore argument is a callable. If given, it
+    is called with the `src` parameter, which is the directory
+    being visited by copytree(), and `names` which is the list of
+    `src` contents, as returned by os.listdir():
+
+        callable(src, names) -> ignored_names
+
+    Since copytree() is called recursively, the callable will be
+    called once for each directory that is copied. It returns a
+    list of names relative to the `src` directory that should
+    not be copied.
+
+    XXX Derived from shutil.copytree, but allow dst dir to exist
+
+    """
+    names = os.listdir(src)
+    if ignore is not None:
+        ignored_names = ignore(src, names)
+    else:
+        ignored_names = set()
+
+    if not os.path.isdir(dst):
+        os.makedirs(dst)
+    errors = []
+    for name in names:
+        if name in ignored_names:
+            continue
+        srcname = os.path.join(src, name)
+        dstname = os.path.join(dst, name)
+        try:
+            if os.path.isdir(srcname):
+                copytree(srcname, dstname, ignore)
+            else:
+                # Will raise a SpecialFileError for unsupported file types
+                shutil.copy2(srcname, dstname)
+        # catch the Error from the recursive copytree so that we can
+        # continue with other files
+        except Error as err:
+            errors.extend(err.args[0])
+        except EnvironmentError as why:
+            errors.append((srcname, dstname, str(why)))
+    try:
+        shutil.copystat(src, dst)
+    except OSError as why:
+        if WindowsError is not None and isinstance(why, WindowsError):
+            # Copying file access times may fail on Windows
+            pass
+        else:
+            errors.append((src, dst, str(why)))
+    if errors:
+        raise Error(errors)
+
+
 
 class PyPyCNotFound(Exception):
     pass
@@ -73,6 +132,49 @@ def get_python_ver(pypy_c, quiet=False):
              'import sysconfig as s; print(s.get_python_version())'], **kwds)
     return ver.strip()
 
+def get_platlibdir(pypy_c, quiet=False):
+    kwds = {'universal_newlines': True}
+    if quiet:
+        kwds['stderr'] = subprocess.NULL
+    ver = subprocess.check_output([str(pypy_c), '-c',
+             'import sysconfig as s; print(s.get_config_var("platlibdir"))'], **kwds)
+    return ver.strip()
+
+    
+def generate_sysconfigdata(pypy_c, stdlib):
+    """Create a _sysconfigdata_*.py file that is platform specific and can be
+    parsed by non-python tools. Used in cross-platform package building and
+    when calling sysconfig.get_config_var
+    """
+    if ARCH == 'win32':
+        return
+    # run ./config.guess to add the HOST_GNU_TYPE (copied from CPython, 
+    # apparently useful for the crossenv package)
+    config_guess = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                'config.guess')
+    try:
+        host_gnu_type = subprocess.check_output([config_guess]).strip()
+    except Exception:
+        host_gnu_type = "unkown"
+
+     # this creates a _sysconfigdata_*.py file in some directory, the name
+    # of the directory is written into pybuilddir.txt
+    subprocess.check_call([str(pypy_c), '-m' 'sysconfig',
+                           '--generate-posix-vars',
+                           # Use PyPy-specific extension to get HOST_GNU_TYPE
+                           'HOST_GNU_TYPE', host_gnu_type])
+    with open('pybuilddir.txt') as fid:
+        dirname = fid.read().strip()
+    assert os.path.exists(dirname)
+    sysconfigdata_names = os.listdir(dirname)
+    # what happens if there is more than one file?
+    assert len(sysconfigdata_names) == 1
+    shutil.copy(os.path.join(dirname, sysconfigdata_names[0]), stdlib)
+    shutil.rmtree(dirname)
+       
+        
+    
+                
 
 def create_package(basedir, options, _fake=False):
     retval = 0
@@ -99,12 +201,20 @@ def create_package(basedir, options, _fake=False):
             ' with --override_pypy_c' % pypy_c)
     builddir = py.path.local(options.builddir)
     pypydir = builddir.ensure(name, dir=True)
-    lib_pypy = pypydir.join('lib_pypy')
-    # do not create lib_pypy yet, it will be created by the copytree below
     if _fake:
-        python_ver = '2.7'
+        python_ver = '3.9'
     else:
         python_ver = get_python_ver(pypy_c)
+    IMPLEMENTATION = 'pypy{}'.format(python_ver)
+    if ARCH == 'win32':
+        target = pypydir.join('Lib')
+    elif _fake:
+        target = pypydir.join('lib', IMPLEMENTATION)
+    else:
+        target = pypydir.join(get_platlibdir(pypy_c), IMPLEMENTATION)
+    os.makedirs(str(target))
+    if not _fake:
+        generate_sysconfigdata(pypy_c, str(target))
     if ARCH == 'win32':
         os.environ['PATH'] = str(basedir.join('externals').join('bin')) + ';' + \
                             os.environ.get('PATH', '')
@@ -144,7 +254,7 @@ def create_package(basedir, options, _fake=False):
     #
 
     includedir = basedir.join('include')
-    shutil.copytree(str(includedir), str(pypydir.join('include')))
+    copytree(str(includedir), str(pypydir.join('include')))
     pypydir.ensure('include', dir=True)
 
     if ARCH == 'win32':
@@ -162,21 +272,13 @@ def create_package(basedir, options, _fake=False):
         print('Picking {} as python.exe'.format(src))
         binaries.append((src, 'pypy.exe', None))
         print('Picking {} as pypy.exe'.format(src))
-        binaries.append((src, 'pypy{}.exe'.format(python_ver), None))
-        print('Picking {} as pypy{}.exe'.format(src, python_ver))
-        binaries.append((src, 'python{}.exe'.format(python_ver), None))
-        print('Picking {} as python{}.exe'.format(src, python_ver))
-        binaries.append((src, 'pypy{}.exe'.format(python_ver[0]), None))
-        print('Picking {} as pypy{}.exe'.format(src, python_ver[0]))
-        binaries.append((src, 'python{}.exe'.format(python_ver[0]), None))
-        print('Picking {} as python{}.exe'.format(src, python_ver[0]))
         # Can't rename a DLL
         win_extras = [('lib' + POSIX_EXE + '-c.dll', None),
-                      ('sqlite3.dll', lib_pypy),
+                      ('sqlite3.dll', target),
                       ('libffi-8.dll', None),
                      ]
         if not options.no__tkinter:
-            tkinter_dir = lib_pypy.join('_tkinter')
+            tkinter_dir = target.join('_tkinter')
             win_extras += [('tcl86t.dll', tkinter_dir), ('tk86t.dll', tkinter_dir)]
 
         for extra, target_dir in win_extras:
@@ -192,7 +294,7 @@ def create_package(basedir, options, _fake=False):
         libsdir = basedir.join('libs')
         if libsdir.exists():
             print('Picking %s (and contents)' % libsdir)
-            shutil.copytree(str(libsdir), str(pypydir.join('libs')))
+            copytree(str(libsdir), str(pypydir.join('libs')))
         else:
             if not _fake:
                 raise RuntimeError('"libs" dir with import library not found.')
@@ -210,7 +312,7 @@ def create_package(basedir, options, _fake=False):
                     if p is None:
                         raise WindowsError("tcl86t.dll not found")
                 tktcldir = p.dirpath().join('..').join('lib')
-                shutil.copytree(str(tktcldir), str(pypydir.join('tcl')))
+                copytree(str(tktcldir), str(pypydir.join('tcl')))
             except WindowsError:
                 print("Packaging Tk runtime failed. tk86t.dll and tcl86t.dll "
                       "found in %s, expecting to find runtime in %s directory "
@@ -220,23 +322,20 @@ def create_package(basedir, options, _fake=False):
                 raise MissingDependenciesError('Tk runtime')
 
     print('* Binaries:', [source.relto(str(basedir))
-                          for source, target, target_dir in binaries])
+                          for source, dst, target_dir in binaries])
 
+    copytree(str(basedir.join('lib-python').join(STDLIB_VER)),
+                    str(target),
+                    ignore=ignore_patterns('.svn', 'py', '*.pyc', '*~','__pycache__'))
     # Careful: to copy lib_pypy, copying just the hg-tracked files
     # would not be enough: there are also build artifacts like cffi-generated
     # dynamic libs
-    shutil.copytree(str(basedir.join('lib-python').join(STDLIB_VER)),
-                    str(pypydir.join('lib-python').join(STDLIB_VER)),
-                    ignore=ignore_patterns('.svn', 'py', '*.pyc', '*~'))
-    shutil.copytree(str(basedir.join('lib_pypy')), str(lib_pypy),
+    copytree(str(basedir.join('lib_pypy')), str(target),
                     ignore=ignore_patterns('.svn', 'py', '*.pyc', '*~',
                                            '*_cffi.c', '*.o', '*.pyd-*', '*.obj',
-                                           '*.lib', '*.exp', '*.manifest'))
+                                           '*.lib', '*.exp', '*.manifest', '__pycache__'))
     for file in ['README.rst',]:
         shutil.copy(str(basedir.join(file)), str(pypydir))
-    for file in ['_testcapimodule.c', '_ctypes_test.c']:
-        shutil.copyfile(str(basedir.join('lib_pypy', file)),
-                        str(lib_pypy.join(file)))
     # Use original LICENCE file
     base_file = str(basedir.join('LICENSE'))
     with open(base_file) as fid:
@@ -244,8 +343,9 @@ def create_package(basedir, options, _fake=False):
     with open(str(pypydir.join('LICENSE')), 'w') as LICENSE:
         LICENSE.write(license)
     #
-    spdir = pypydir.ensure('site-packages', dir=True)
-    shutil.copy(str(basedir.join('site-packages', 'README')), str(spdir))
+    spdir = target.ensure('site-packages', dir=True)
+    shutil.copy(str(basedir.join('lib', IMPLEMENTATION, 'site-packages', 'README')),
+                str(spdir))
     #
     if ARCH == 'win32':
         bindir = pypydir
@@ -261,13 +361,13 @@ def create_package(basedir, options, _fake=False):
             shutil.copy(str(source), str(archive))
         else:
             open(str(archive), 'wb').close()
-        os.chmod(str(archive), 0755)
+        os.chmod(str(archive), 0o755)
     if not _fake and not ARCH == 'win32':
-        # create a link to pypy, python
+        # create a link to pypy, python 
         old_dir = os.getcwd()
         os.chdir(str(bindir))
         try:
-            os.symlink(POSIX_EXE, 'pypy{}'.format(python_ver))
+            os.symlink(POSIX_EXE, 'pypy')
             os.symlink(POSIX_EXE, 'pypy{}'.format(python_ver[0]))
             os.symlink(POSIX_EXE, 'python')
             os.symlink(POSIX_EXE, 'python{}'.format(python_ver))
@@ -293,7 +393,7 @@ def create_package(basedir, options, _fake=False):
                 os.chdir(str(name))
                 if not os.path.exists('lib'):
                     os.mkdir('lib')
-                make_portable()
+                make_portable(copytree, python_ver)
                 os.chdir(str(builddir))
         if USE_ZIPFILE_MODULE:
             import zipfile
@@ -325,10 +425,12 @@ def create_package(basedir, options, _fake=False):
     finally:
         os.chdir(old_dir)
     if options.targetdir:
-        print("Copying %s to %s" % (archive, options.targetdir))
-        shutil.copy(archive, options.targetdir)
-    else:
-        print("Ready in %s" % (builddir,))
+        tdir = os.path.normpath(options.targetdir)
+        adir = os.path.dirname(archive)
+        if tdir != adir:
+            print("Copying %s to %s" % (archive, options.targetdir))
+            shutil.copy(archive, options.targetdir)
+    print("Ready in %s" % (builddir,))
     return retval, builddir # for tests
 
 def package(*args, **kwds):
@@ -369,7 +471,7 @@ def package(*args, **kwds):
     parser.add_argument('--targetdir', type=str, default='',
         help='destination dir for archive')
     parser.add_argument('--override_pypy_c', type=str, default='',
-        help='use as pypy3 exe instead of pypy/goal/pypy3-c')
+        help='use as pypy3 exe, default is %s' % POSIX_EXE)
     parser.add_argument('--embedded-dependencies', '--no-embedded-dependencies',
                         dest='embed_dependencies',
                         action=NegateAction,
@@ -384,15 +486,15 @@ def package(*args, **kwds):
                             'dependent shared objects and mangling RPATH')
     options = parser.parse_args(args)
 
-    if os.environ.has_key("PYPY_PACKAGE_NOKEEPDEBUG"):
+    if "PYPY_PACKAGE_NOKEEPDEBUG" in os.environ:
         options.keep_debug = False
-    if os.environ.has_key("PYPY_PACKAGE_WITHOUTTK"):
+    if "PYPY_PACKAGE_WITHOUTTK" in os.environ:
         options.no__tkinter = True
-    if os.environ.has_key("PYPY_EMBED_DEPENDENCIES"):
+    if "PYPY_EMBED_DEPENDENCIES" in os.environ:
         options.embed_dependencies = True
-    elif os.environ.has_key("PYPY_NO_EMBED_DEPENDENCIES"):
+    elif "PYPY_NO_EMBED_DEPENDENCIES" in os.environ:
         options.embed_dependencies = False
-    if os.environ.has_key("PYPY_MAKE_PORTABLE"):
+    if "PYPY_MAKE_PORTABLE" in os.environ:
         options.make_portable = True
     if not options.builddir:
         # The import actually creates the udir directory

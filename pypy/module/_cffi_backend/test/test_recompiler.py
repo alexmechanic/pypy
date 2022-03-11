@@ -67,7 +67,7 @@ def prepare(space, cdef, module_name, source, w_includes=None,
     base_module_name = module_name.split('.')[-1]
     sources = []
     if w_extra_source is not None:
-        sources.append(space.str_w(w_extra_source))
+        sources.append(space.text_w(w_extra_source))
     kwargs = {}
     if w_extra_compile_args is not None:
         kwargs['extra_compile_args'] = space.unwrap(w_extra_compile_args)
@@ -87,8 +87,12 @@ def prepare(space, cdef, module_name, source, w_includes=None,
 
     args_w = [space.wrap(module_name), space.wrap(so_file)]
     w_res = space.appexec(args_w, """(modulename, filename):
-        import imp
-        mod = imp.load_dynamic(modulename, filename)
+        import _imp
+        class Spec: pass
+        spec = Spec()
+        spec.name = modulename
+        spec.origin = filename
+        mod = _imp.create_dynamic(spec)
         assert mod.__name__ == modulename
         return (mod.ffi, mod.lib)
     """)
@@ -101,7 +105,7 @@ def prepare(space, cdef, module_name, source, w_includes=None,
 
 
 class AppTestRecompiler:
-    spaceconfig = dict(usemodules=['_cffi_backend', 'imp'])
+    spaceconfig = dict(usemodules=['_cffi_backend', 'imp', 'cpyext', 'struct'])
 
     def setup_class(cls):
         if cls.runappdirect:
@@ -112,6 +116,7 @@ class AppTestRecompiler:
 
     def setup_method(self, meth):
         self._w_modules = self.space.appexec([], """():
+            import cpyext      # ignore stuff there in the leakfinder
             import sys
             return set(sys.modules)
         """)
@@ -123,7 +128,7 @@ class AppTestRecompiler:
             del self.space._cleanup_ffi
         self.space.appexec([self._w_modules], """(old_modules):
             import sys
-            for key in sys.modules.keys():
+            for key in list(sys.modules.keys()):
                 if key not in old_modules:
                     del sys.modules[key]
         """)
@@ -940,13 +945,13 @@ class AppTestRecompiler:
         # but we can get its address
         p = ffi.addressof(lib, 'globvar')
         assert ffi.typeof(p) == ffi.typeof('opaque_t *')
-        assert ffi.string(ffi.cast("char *", p), 8) == "hello"
+        assert ffi.string(ffi.cast("char *", p), 8) == b"hello"
 
     def test_constant_of_value_unknown_to_the_compiler(self):
         extra_c_source = self.udir + self.os_sep + (
             'extra_test_constant_of_value_unknown_to_the_compiler.c')
-        with open(extra_c_source, 'w') as f:
-            f.write('const int external_foo = 42;\n')
+        with open(extra_c_source, 'wb') as f:
+            f.write(b'const int external_foo = 42;\n')
         ffi, lib = self.prepare(
             "const int external_foo;",
             'test_constant_of_value_unknown_to_the_compiler',
@@ -1097,7 +1102,7 @@ class AppTestRecompiler:
         #
         @ffi.callback("int *(*)(void)")
         def get_my_value():
-            return values + it.next()
+            return values + next(it)
         lib.get_my_value = get_my_value
         #
         values[0] = 41
@@ -1441,7 +1446,7 @@ class AppTestRecompiler:
                 def getvalue(self):
                     if self._result is None:
                         os.close(self._wr)
-                        self._result = os.read(self._rd, 4096)
+                        self._result = os.read(self._rd, 4096).decode()
                         os.close(self._rd)
                         # xxx hack away these lines
                         while self._result.startswith('[platform:execute]'):
@@ -1512,11 +1517,11 @@ class AppTestRecompiler:
         baz1 = ffi.def_extern()(baz)
         assert baz1 is baz
         seen = []
-        baz(40L, 4L)
-        res = lib.baz(50L, 8L)
+        baz(40, 4)
+        res = lib.baz(50, 8)
         assert res is None
-        assert seen == [("Baz", 40L, 4L), ("Baz", 50, 8)]
-        assert type(seen[0][1]) is type(seen[0][2]) is long
+        assert seen == [("Baz", 40, 4), ("Baz", 50, 8)]
+        assert type(seen[0][1]) is type(seen[0][2]) is int
         assert type(seen[1][1]) is type(seen[1][2]) is int
 
         @ffi.def_extern(name="bok")
@@ -1567,10 +1572,11 @@ class AppTestRecompiler:
             return n * 10
         with self.StdErrCapture() as f:
             res = lib.bar(321)
+        msg = f.getvalue()
         assert res is None
-        assert f.getvalue() == (
-            "From cffi callback %r:\n" % (bar,) +
-            "Trying to convert the result back to C:\n"
+        assert "rom cffi callback %r" % (bar,) in msg
+        assert "rying to convert the result back to C:\n" in msg
+        assert msg.endswith(
             "TypeError: callback with the return type 'void' must return None\n")
 
     def test_extern_python_redefine(self):
@@ -2063,7 +2069,7 @@ class AppTestRecompiler:
                 return s;
             }
         """, packed=True, min_version=(1, 8, 3))
-        assert lib.f().y == chr(40)
+        assert ord(lib.f().y) == 40
         assert lib.f().x == 200
         e = raises(NotImplementedError, lib.g, 0)
         assert str(e.value) == (
@@ -2169,3 +2175,15 @@ class AppTestRecompiler:
         # too, but likely the check in the code ">= 1000" usually triggers
         # before that, and raise a RuntimeError too, but with the more
         # explicit message.
+
+    def test_call_function_offset_in_bytes(self):
+        from _cffi_backend import _offset_in_bytes
+        ffi, lib = self.prepare("""
+        int foo(char* arg);
+        """, "test_call_function_offset_in_bytes", """
+        int foo(char* arg) {
+            return(arg[0] * 10);
+        }
+        """)
+        assert lib.foo(_offset_in_bytes(b"foo", 0)) == ord(b"f") * 10
+        assert lib.foo(_offset_in_bytes(b"foobxo", 4)) == ord(b"x") * 10

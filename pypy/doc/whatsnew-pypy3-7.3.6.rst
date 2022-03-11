@@ -2,13 +2,12 @@
 What's new in PyPy3.7 7.3.6
 ===========================
 
-.. this is a revision shortly after release-pypy-7.3.4
-.. startrev: 9c11d242d78c
+.. this is the revision after release-pypy3.6-v7.3.3
+.. startrev: a57ea1224248
 
 .. branch: hpy
 
 Merge latest hpy
-
 
 .. branch: py3.7-errormsg-improvements
 
@@ -53,6 +52,13 @@ Add a ``sys.implementation._multiarch`` field like CPython on linux, darwin via
 Add a ``lib_pypy/_sysconfigdata__*.py`` file like CPython on linux, darwin
 during packaging via ``sysconfig._generate_posix_vars()`` (issue 3483).
 
+.. branch: py3.8-reversed-dict
+Implement ``reversed(dict)``
+.. branch: py3.8-new-opcodes
+Implement new opcodes that CPython 3.8 uses
+
+.. branch: py3.8-buffer-gets-w_obj
+Refactor the buffer implementation to add a ``.w_obj`` field to ``BufferView``.
 .. branch: hpy-0.0.2
 
 Update HPy backend to 0.0.2

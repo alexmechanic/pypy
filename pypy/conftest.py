@@ -1,6 +1,11 @@
-import py, pytest, sys, textwrap
+import py, pytest, sys, os, textwrap
 from inspect import isclass
 
+LOOK_FOR_PYTHON3 = 'python3.9'
+PYTHON3 = os.getenv('PYTHON3') or py.path.local.sysfind(LOOK_FOR_PYTHON3)
+if PYTHON3 is not None:
+    PYTHON3 = str(PYTHON3)
+HOST_IS_PY3 = sys.version_info[0] > 2
 APPLEVEL_FN = 'apptest_*.py'
 
 # pytest settings
@@ -44,24 +49,41 @@ def pytest_cmdline_preparse(config, args):
         args.append('--assert=reinterp')
 
 def pytest_configure(config):
+    if HOST_IS_PY3 and not config.getoption('direct_apptest'):
+        raise ValueError(
+            "On top of a Python 3 interpreter, the -D flag is mandatory")
     global option
     option = config.option
     mode_A = config.getoption('runappdirect')
     mode_D = config.getoption('direct_apptest')
+    def py3k_skip(message):
+        py.test.skip('[py3k] %s' % message)
+    py.test.py3k_skip = py3k_skip
     if mode_D or not mode_A:
         config.addinivalue_line('python_files', APPLEVEL_FN)
     if not mode_A and not mode_D:  # 'own' tests
         from rpython.conftest import LeakFinder
         config.pluginmanager.register(LeakFinder())
+        # pypy.interpreter.astcompiler and pypy.module._cppyy need this,
+        # as well as a few others
+        sys.setrecursionlimit(2000)
+    if mode_A:
+        from pypy.tool.pytest.apptest import PythonInterpreter
+        config.applevel = PythonInterpreter(config.option.python)
+    else:
+        config.applevel = None
 
 def pytest_addoption(parser):
     group = parser.getgroup("pypy options")
     group.addoption('-A', '--runappdirect', action="store_true",
            default=False, dest="runappdirect",
-           help="run legacy applevel tests directly on python interpreter (not through PyPy)")
+           help="run legacy applevel tests directly on the python interpreter " +
+                "specified by --python")
+    group.addoption('--python', type="string", default=PYTHON3,
+           help="python interpreter to run appdirect tests with")
     group.addoption('-D', '--direct-apptest', action="store_true",
            default=False, dest="direct_apptest",
-           help="run applevel_XXX.py tests directly on host interpreter")
+           help="run '%s' tests directly on host interpreter" % APPLEVEL_FN)
     group.addoption('--direct', action="store_true",
            default=False, dest="rundirect",
            help="run pexpect tests directly")
@@ -93,10 +115,13 @@ def ensure_pytest_builtin_helpers(helpers='skip raises'.split()):
         apparently earlier on "raises" was already added
         to module's globals.
     """
-    import __builtin__
+    try:
+        import builtins
+    except ImportError:
+        import __builtin__ as builtins
     for helper in helpers:
-        if not hasattr(__builtin__, helper):
-            setattr(__builtin__, helper, getattr(py.test, helper))
+        if not hasattr(builtins, helper):
+            setattr(builtins, helper, getattr(py.test, helper))
 
 def pytest_sessionstart(session):
     """ before session.main() is called. """
@@ -166,7 +191,7 @@ def skip_on_missing_buildoption(**ropts):
     import sys
     options = getattr(sys, 'pypy_translation_info', None)
     if options is None:
-        py.test.skip("not running on translated pypy "
+        py.test.skip("not running on translated pypy3 "
                      "(btw, i would need options: %s)" %
                      (ropts,))
     for opt in ropts:
@@ -174,25 +199,21 @@ def skip_on_missing_buildoption(**ropts):
             break
     else:
         return
-    py.test.skip("need translated pypy with: %s, got %s"
+    py.test.skip("need translated pypy3 with: %s, got %s"
                  %(ropts,options))
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item):
     if isinstance(item, py.test.collect.Function):
         config = item.config
-        appdirect = (config.getoption('runappdirect') or
-            config.getoption('direct_apptest'))
-        if (item.get_marker(name='pypy_only') and
-                appdirect and not '__pypy__' in sys.builtin_module_names):
-            pytest.skip('PyPy-specific test')
+        if item.get_marker(name='pypy_only'):
+            if config.applevel is not None and not config.applevel.is_pypy:
+                pytest.skip('PyPy-specific test')
         appclass = item.getparent(py.test.Class)
         if appclass is not None:
             from pypy.tool.pytest.objspace import gettestobjspace
             # Make cls.space and cls.runappdirect available in tests.
             spaceconfig = getattr(appclass.obj, 'spaceconfig', {})
-            if not appdirect:
-                spaceconfig.setdefault('objspace.std.reinterpretasserts', True)
             appclass.obj.space = gettestobjspace(**spaceconfig)
             appclass.obj.runappdirect = config.option.runappdirect
 

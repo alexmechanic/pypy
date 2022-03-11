@@ -8,6 +8,7 @@ from pypy.interpreter.baseobjspace import W_Root
 from pypy.interpreter.error import oefmt
 from pypy.interpreter.gateway import unwrap_spec, WrappedDefault
 from pypy.interpreter.typedef import TypeDef, interp2app
+from pypy.objspace.std.util import generic_alias_class_getitem
 
 class W_DictProxyObject(W_Root):
     "Read-only proxy for mappings."
@@ -17,7 +18,13 @@ class W_DictProxyObject(W_Root):
 
     @staticmethod
     def descr_new(space, w_type, w_mapping):
-        raise oefmt(space.w_TypeError, "Cannot create 'dictproxy' instances")
+        if (not space.lookup(w_mapping, "__getitem__") or
+                space.isinstance_w(w_mapping, space.w_list) or
+                space.isinstance_w(w_mapping, space.w_tuple)):
+            raise oefmt(space.w_TypeError,
+                        "mappingproxy() argument must be a mapping, not %T",
+                        w_mapping)
+        return W_DictProxyObject(w_mapping)
 
     def descr_init(self, space, __args__):
         pass
@@ -38,8 +45,17 @@ class W_DictProxyObject(W_Root):
         return space.str(self.w_mapping)
 
     def descr_repr(self, space):
-        return space.newtext("dict_proxy(%s)" %
-                                (space.text_w(space.repr(self.w_mapping)),))
+        return space.newtext(b"mappingproxy(%s)" %
+                                (space.utf8_w(space.repr(self.w_mapping)),))
+
+    def descr_or(self, space, w_other):
+        if isinstance(w_other, W_DictProxyObject):
+            w_other = w_other.w_mapping
+        if not space.isinstance_w(w_other, space.w_dict):
+            return space.w_NotImplemented
+        w_copyself = self.copy_w(space)
+        space.call_method(w_copyself, "update", w_other)
+        return w_copyself
 
     @unwrap_spec(w_default=WrappedDefault(None))
     def get_w(self, space, w_key, w_default):
@@ -48,23 +64,17 @@ class W_DictProxyObject(W_Root):
     def keys_w(self, space):
         return space.call_method(self.w_mapping, "keys")
 
-    def descr_iterkeys(self, space):
-        return space.call_method(self.w_mapping, "iterkeys")
-
     def values_w(self, space):
         return space.call_method(self.w_mapping, "values")
-
-    def descr_itervalues(self, space):
-        return space.call_method(self.w_mapping, "itervalues")
 
     def items_w(self, space):
         return space.call_method(self.w_mapping, "items")
 
-    def descr_iteritems(self, space):
-        return space.call_method(self.w_mapping, "iteritems")
-
     def copy_w(self, space):
         return space.call_method(self.w_mapping, "copy")
+
+    def descr_reversed(self, space):
+        return space.call_method(self.w_mapping, "__reversed__")
 
 cmp_methods = {}
 def make_cmp_method(op):
@@ -80,7 +90,7 @@ for op in ['eq', 'ne', 'gt', 'ge', 'lt', 'le']:
 
 
 W_DictProxyObject.typedef = TypeDef(
-    'dictproxy',
+    'mappingproxy',
     __new__=interp2app(W_DictProxyObject.descr_new),
     __init__=interp2app(W_DictProxyObject.descr_init),
     __len__=interp2app(W_DictProxyObject.descr_len),
@@ -89,13 +99,14 @@ W_DictProxyObject.typedef = TypeDef(
     __iter__=interp2app(W_DictProxyObject.descr_iter),
     __str__=interp2app(W_DictProxyObject.descr_str),
     __repr__=interp2app(W_DictProxyObject.descr_repr),
+    __or__=interp2app(W_DictProxyObject.descr_or),
+    __reversed__ = interp2app(W_DictProxyObject.descr_reversed),
+    __class_getitem__ = interp2app(
+        generic_alias_class_getitem, as_classmethod=True),
     get=interp2app(W_DictProxyObject.get_w),
     keys=interp2app(W_DictProxyObject.keys_w),
-    iterkeys=interp2app(W_DictProxyObject.descr_iterkeys),
     values=interp2app(W_DictProxyObject.values_w),
-    itervalues=interp2app(W_DictProxyObject.descr_itervalues),
     items=interp2app(W_DictProxyObject.items_w),
-    iteritems=interp2app(W_DictProxyObject.descr_iteritems),
     copy=interp2app(W_DictProxyObject.copy_w),
     **cmp_methods
 )

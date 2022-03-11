@@ -20,13 +20,13 @@ def syntax_warning(space, msg, fn, lineno, offset):
     If the user has set this warning to raise an error, a SyntaxError will be
     raised."""
     w_msg = space.newtext(msg)
-    w_filename = space.newtext(fn)
+    w_filename = space.newfilename(fn)
     w_lineno = space.newint(lineno)
     w_offset = space.newint(offset)
     _emit_syntax_warning(space, w_msg, w_filename, w_lineno, w_offset)
 
 
-def parse_future(tree, feature_flags):
+def parse_future(space, tree, feature_flags):
     from pypy.interpreter.astcompiler import ast
     future_lineno = 0
     future_column = 0
@@ -40,11 +40,14 @@ def parse_future(tree, feature_flags):
     if body is None:
         return 0, 0, 0
     for stmt in body:
-        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Str):
-            if have_docstring:
-                break
-            else:
-                have_docstring = True
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant):
+            constant = stmt.value
+            assert isinstance(constant, ast.Constant)
+            if space.isinstance_w(constant.value, space.w_unicode):
+                if have_docstring:
+                    break
+                else:
+                    have_docstring = True
         elif isinstance(stmt, ast.ImportFrom):
             if stmt.module == "__future__":
                 future_lineno = stmt.lineno
@@ -68,11 +71,15 @@ class ForbiddenNameAssignment(Exception):
         self.node = node
 
 
-def check_forbidden_name(name, node=None):
+def check_forbidden_name(space, name):
     """Raise an error if the name cannot be assigned to."""
-    if name in ("None", "__debug__"):
-        raise ForbiddenNameAssignment(name, node)
-    # XXX Warn about using True and False
+    if name == "__debug__":
+        return True
+    if name in ("async", "await"):
+        space.warn(space.newtext(
+            "'async' and 'await' will become reserved keywords"
+            " in Python 3.7"), space.w_DeprecationWarning)
+    return False
 
 
 def dict_to_switch(d):
@@ -110,9 +117,23 @@ def mangle(name, klass):
 
 def intern_if_common_string(space, w_const):
     # only intern identifier-like strings
-    if not space.is_w(space.type(w_const), space.w_text):
-        return w_const
-    for c in space.text_w(w_const):
-        if not (c.isalnum() or c == '_'):
-            return w_const
-    return space.new_interned_w_str(w_const)
+    from pypy.objspace.std.unicodeobject import _isidentifier
+    if (space.is_w(space.type(w_const), space.w_unicode) and
+        _isidentifier(space.utf8_w(w_const))):
+        return space.new_interned_w_str(w_const)
+    return w_const
+
+
+def new_identifier(space, name):
+    # Check whether there are non-ASCII characters in the identifier; if
+    # so, normalize to NFKC
+    for c in name:
+        if ord(c) > 0x80:
+            break
+    else:
+        return name
+
+    from pypy.module.unicodedata.interp_ucd import ucd
+    w_name = space.newtext(name)
+    w_id = space.call_method(ucd, 'normalize', space.newtext('NFKC'), w_name)
+    return space.text_w(w_id)

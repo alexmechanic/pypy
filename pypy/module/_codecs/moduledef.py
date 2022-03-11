@@ -1,5 +1,6 @@
 from pypy.interpreter.mixedmodule import MixedModule
 from rpython.rlib.objectmodel import not_rpython
+from rpython.rlib import rwin32
 from pypy.module._codecs import interp_codecs
 
 class Module(MixedModule):
@@ -29,7 +30,7 @@ class Module(MixedModule):
    PyUnicode_FromObject() prior to applying the conversion.
 
    These <encoding>s are available: utf_8, unicode_escape,
-   raw_unicode_escape, unicode_internal, latin_1, ascii (7-bit),
+   raw_unicode_escape, latin_1, ascii (7-bit),
    mbcs (on win32).
 
 
@@ -72,7 +73,6 @@ Copyright (c) Corporation for National Research Initiatives.
          'utf_32_le_decode' : 'interp_codecs.utf_32_le_decode',
          'utf_32_le_encode' : 'interp_codecs.utf_32_le_encode',
          'utf_32_ex_decode' : 'interp_codecs.utf_32_ex_decode',
-         'charbuffer_encode': 'interp_codecs.charbuffer_encode',
          'readbuffer_encode': 'interp_codecs.readbuffer_encode',
          'charmap_decode'   : 'interp_codecs.charmap_decode',
          'charmap_encode'   : 'interp_codecs.charmap_encode',
@@ -82,17 +82,18 @@ Copyright (c) Corporation for National Research Initiatives.
          'unicode_escape_encode'     :  'interp_codecs.unicode_escape_encode',
          'raw_unicode_escape_decode' :  'interp_codecs.raw_unicode_escape_decode',
          'raw_unicode_escape_encode' :  'interp_codecs.raw_unicode_escape_encode',
-         'unicode_internal_decode'   :  'interp_codecs.unicode_internal_decode',
-         'unicode_internal_encode'   :  'interp_codecs.unicode_internal_encode',
     }
 
     @not_rpython
     def __init__(self, space, *args):
-        # mbcs codec is Windows specific, and based on rffi.
-        from rpython.rlib import runicode
-        if (hasattr(runicode, 'str_decode_mbcs')):
+        # mbcs codec is Windows specific, and based on rffi system calls.
+        if rwin32.WIN32:
             self.interpleveldefs['mbcs_encode'] = 'interp_codecs.mbcs_encode'
+            self.interpleveldefs['oem_encode'] = 'interp_codecs.oem_encode'
+            self.interpleveldefs['code_page_encode'] = 'interp_codecs.code_page_encode'
             self.interpleveldefs['mbcs_decode'] = 'interp_codecs.mbcs_decode'
+            self.interpleveldefs['oem_decode'] = 'interp_codecs.oem_decode'
+            self.interpleveldefs['code_page_decode'] = 'interp_codecs.code_page_decode'
 
         MixedModule.__init__(self, space, *args)
 

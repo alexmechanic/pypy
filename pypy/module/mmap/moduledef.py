@@ -5,10 +5,11 @@ class Module(MixedModule):
         'PAGESIZE': 'space.wrap(interp_mmap.PAGESIZE)',
         'ALLOCATIONGRANULARITY': 'space.wrap(interp_mmap.ALLOCATIONGRANULARITY)',
         'ACCESS_READ' : 'space.wrap(interp_mmap.ACCESS_READ)',
+        'ACCESS_DEFAULT' : 'space.wrap(interp_mmap.ACCESS_DEFAULT)',
         'ACCESS_WRITE': 'space.wrap(interp_mmap.ACCESS_WRITE)',
         'ACCESS_COPY' : 'space.wrap(interp_mmap.ACCESS_COPY)',
         'mmap': 'interp_mmap.W_MMap',
-        'error': 'space.fromcache(interp_mmap.Cache).w_error',
+        'error': 'space.w_OSError',
     }
 
     appleveldefs = {

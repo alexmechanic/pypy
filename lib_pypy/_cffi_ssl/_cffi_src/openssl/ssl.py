@@ -144,6 +144,21 @@ static const long TLS_ST_OK;
 
 static const long OPENSSL_NPN_NEGOTIATED;
 
+static const long SSL3_VERSION;
+static const long TLS1_VERSION;
+static const long TLS1_1_VERSION;
+static const long TLS1_2_VERSION;
+
+static const long SSL3_RT_CHANGE_CIPHER_SPEC;
+static const long SSL3_RT_ALERT;
+static const long SSL3_RT_HANDSHAKE;
+static const long SSL3_RT_APPLICATION_DATA;
+
+static const long SSL3_RT_HEADER;
+static const long SSL3_RT_INNER_CONTENT_TYPE;
+
+static const long SSL3_MT_CHANGE_CIPHER_SPEC;
+
 typedef ... SSL_METHOD;
 typedef ... SSL_CTX;
 
@@ -162,6 +177,7 @@ typedef struct {
     const char *name;
     unsigned long id;
 } SRTP_PROTECTION_PROFILE;
+static const long Cryptography_HAS_X509_CHECK_FLAG_NEVER_CHECK_SUBJECT;
 """
 
 FUNCTIONS = """
@@ -574,6 +590,19 @@ int SSL_get_min_proto_version(SSL *ssl);
 int SSL_get_max_proto_version(SSL *ssl);
 
 ASN1_OCTET_STRING *a2i_IPADDRESS(const char *ipasc);
+
+int SSL_set_num_tickets(SSL *s, size_t num_tickets);
+size_t SSL_get_num_tickets(const SSL *s);
+int SSL_CTX_set_num_tickets(SSL_CTX *ctx, size_t num_tickets);
+size_t SSL_CTX_get_num_tickets(const SSL_CTX *ctx);
+void SSL_CTX_set_msg_callback(SSL_CTX *ctx,
+                              void (*cb) (int write_p, int version,
+                                          int content_type, const void *buf,
+                                          size_t len, SSL *ssl, void *arg));
+void SSL_set_msg_callback(SSL *ssl,
+                          void (*cb) (int write_p, int version,
+                                      int content_type, const void *buf,
+                                      size_t len, SSL *ssl, void *arg));
 """
 
 CUSTOMIZATIONS = """
@@ -916,5 +945,10 @@ static const long SSL_OP_IGNORE_UNEXPECTED_EOF = 0;
 static const long Crytpography_HAS_OP_IGNORE_UNEXPECTED_EOF = 0;
 #else
 static const long Crytpography_HAS_OP_IGNORE_UNEXPECTED_EOF = 1;
+#endif
+#ifdef X509_CHECK_FLAG_NEVER_CHECK_SUBJECT
+static const long Cryptography_HAS_X509_CHECK_FLAG_NEVER_CHECK_SUBJECT = 1;
+#else
+static const long Cryptography_HAS_X509_CHECK_FLAG_NEVER_CHECK_SUBJECT = 0;
 #endif
 """
