@@ -1129,7 +1129,8 @@ class _SSLContext(object):
         options |= lib.SSL_OP_CIPHER_SERVER_PREFERENCE
         options |= lib.SSL_OP_SINGLE_DH_USE
         options |= lib.SSL_OP_SINGLE_ECDH_USE
-        # HOTFIX installing modules via pip
+        # HOTFIX installing modules via pip:
+        #   AttributeError: cffi library '_pypy_openssl' has no function, constant or global variable named 'Crytpography_HAS_OP_IGNORE_UNEXPECTED_EOF'
         # FIXME: this seems not be hardly affecting anything
         # as it seems to be optional flag, but keep in mind
         # in case of similar issues.
